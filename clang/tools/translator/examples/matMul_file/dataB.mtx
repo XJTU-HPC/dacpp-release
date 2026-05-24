@@ -1,0 +1,23 @@
+%%MatrixMarket matrix array integer general
+% Matrix B: 5x4, data provided by user
+5 4
+1
+17
+14
+11
+8
+5
+2
+18
+15
+12
+9
+6
+3
+19
+16
+13
+10
+7
+4
+20
