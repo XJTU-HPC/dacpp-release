@@ -1,6 +1,7 @@
 #ifndef TRANSLATOR_PARSER_CALC_H
 #define TRANSLATOR_PARSER_CALC_H
 
+
 #include <string>
 #include <vector>
 
@@ -9,26 +10,37 @@
 #include "Split.h"
 #include "Param.h"
 
+
 using namespace clang;
+
 
 namespace dacppTranslator {
 struct clacparam{
     std::string name;
-    int dimesion;
-    std::vector<int> dimid;
-    std::vector<int> flag;
+    int dimesion;//数据自身维度
+    std::vector<int> dimid;//算子作用维度；
+    std::vector<int> flag; //用来标记是否是降维算子；
 };
+
+
 
 class Expression;
 
+
+/**
+ * 存储计算结构信息
+ */
 class Calc {
 private:
-    std::string name;
-    std::vector<Param*> params;
-
-    std::vector<Expression*> exprs;
-    Expression* father;
-    FunctionDecl* calcLoc;
+    std::string name; // 函数名
+    std::vector<Param*> params; // 参数
+    /*
+        计算函数中可能也包含数据关联计算表达式
+        存在数据关联表达式的嵌套这种情况需要以树的形式将其保存起来
+    */
+    std::vector<Expression*> exprs; // 数据关联计算表达式
+    Expression* father; // 所属的数据关联计算表达式
+    FunctionDecl* calcLoc; // AST中Calc节点的位置
 
 public:
     Calc();
@@ -57,10 +69,12 @@ public:
     FunctionDecl* getCalcLoc();
 
     void parseCalc(const BinaryOperator* dacExpr);
-    std::vector<std::string> body;
+    std::vector<std::string> body; // 函数体
 
+    // 存储划分后的函数体
     std::vector<std::string> blocks;
 };
+
 
 }
 

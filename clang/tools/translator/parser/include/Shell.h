@@ -1,6 +1,7 @@
 #ifndef TRANSLATOR_PARSER_SHELL_H
 #define TRANSLATOR_PARSER_SHELL_H
 
+
 #include <string>
 #include <vector>
 
@@ -11,7 +12,9 @@
 
 using namespace clang;
 
+
 namespace dacppTranslator {
+
 
 class Expression;
 
@@ -22,15 +25,18 @@ typedef struct _tagBINDINFO
     std::string offset;
     } 	BINDINFO;
 
+/**
+ * 存储划分结构信息
+ */
 class Shell {
-
+// rewriter_->ReplaceText(shellFunc->getSourceRange(), "");
 private:
-    std::string name;
-    std::vector<Param*> params;
-    std::vector<Split*> splits;
-    std::vector<ShellParam*> shellParams;
-    Expression* father;
-    FunctionDecl* shellLoc;
+    std::string name; // 函数名
+    std::vector<Param*> params; // 参数列表
+    std::vector<Split*> splits; // 划分列表
+    std::vector<ShellParam*> shellParams; // 划分结构参数
+    Expression* father; // 所属的数据关联计算表达式
+    FunctionDecl* shellLoc; // AST中Shell节点的位置
 
 public:
     Shell();
@@ -64,6 +70,7 @@ public:
     ALGraph *G;
 };
 
-}
+
+} // namespace dacppTranslator
 
 #endif

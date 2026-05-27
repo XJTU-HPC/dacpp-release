@@ -9,6 +9,7 @@
 #include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/StringExtras.h"
 
+
 #include "ASTParse.h"
 #include "Calc.h"
 #include "DacppStructure.h"
@@ -20,8 +21,12 @@
 
 namespace {
 
-namespace declvisitor {
+//===----------------------------------------------------------------------===//
+// StmtPrinter Visitor
+//===----------------------------------------------------------------------===//
 
+namespace declvisitor {
+/// A simple visitor class that helps create declaration visitors.
 template<template <typename> class Ptr, typename ImplClass, typename RetTy=void>
 class Base {
 public:
@@ -39,6 +44,8 @@ public:
     llvm_unreachable("Decl that isn't part of DeclNodes.inc!");
   }
 
+  // If the implementation chooses not to implement a certain visit
+  // method, fall back to the parent.
 #define DECL(DERIVED, BASE) \
   RetTy Visit##DERIVED##Decl(PTR(DERIVED##Decl) D) { DISPATCH(BASE, BASE); }
 #include "clang/AST/DeclNodes.inc"
@@ -49,12 +56,19 @@ public:
 #undef DISPATCH
 };
 
-}
+} // namespace declvisitor
 
+/// A simple visitor class that helps create declaration visitors.
+///
+/// This class does not preserve constness of Decl pointers (see also
+/// ConstDeclVisitor).
 template <typename ImplClass, typename RetTy = void>
 class DeclVisitor
     : public declvisitor::Base<std::add_pointer, ImplClass, RetTy> {};
 
+/// A simple visitor class that helps create declaration visitors.
+///
+/// This class preserves constness of Decl pointers (see also DeclVisitor).
 template <typename ImplClass, typename RetTy = void>
 class ConstDeclVisitor
     : public declvisitor::Base<llvm::make_const_ptr, ImplClass, RetTy> {};
@@ -77,6 +91,10 @@ class ConstDeclVisitor
     void PrintConstructorInitializers(CXXConstructorDecl *CDecl,
                                       std::string &Proto);
 
+    /// Print an Objective-C method type in parentheses.
+    ///
+    /// \param Quals The Objective-C declaration qualifiers.
+    /// \param T The type to print.
     void PrintObjCMethodType(ASTContext &Ctx, Decl::ObjCDeclQualifier Quals,
                              QualType T);
 
@@ -90,7 +108,7 @@ class ConstDeclVisitor
     virtual void PrintStmt(Stmt *S, int SubIndent) {
       Indentation += SubIndent;
       if (isa_and_nonnull<Expr>(S)) {
-
+        // If this is an expr used in a stmt context, indent and newline it.
         Indent();
         Visit(S);
         Out << ";" << NL;
@@ -103,7 +121,7 @@ class ConstDeclVisitor
     }
 
     virtual void PrintInitStmt(Stmt *S, unsigned PrefixWidth) {
-
+      // FIXME: Cope better with odd prefix widths.
       Indentation += (PrefixWidth + 1) / 2;
       if (auto *DS = dyn_cast<DeclStmt>(S))
         PrintRawDeclStmt(DS);
@@ -167,7 +185,7 @@ class ConstDeclVisitor
   virtual ~DeclPrinter() = default;
 
     DeclPrinter(dacppTranslator::Calc *calc, raw_ostream &Out, PrinterHelper *helper, const PrintingPolicy &Policy,
-                const ASTContext &Context, unsigned Indentation = 0,StringRef NL = "\n",
+                const ASTContext &Context, unsigned Indentation = 0,StringRef NL = "\n", 
                 bool PrintInstantiation = false)
         : Policy(Policy), Context(Context), Indentation(Indentation),
           PrintInstantiation(PrintInstantiation), Helper(helper), NL(NL), calc(calc) , Out(Out){}
@@ -278,8 +296,9 @@ void DeclPrinter::print(Decl *D, raw_ostream &Out, const PrintingPolicy &Policy,
   this->Base::Visit(const_cast<Decl*>(D));
 }
 
-QualType DeclPrinter::GetBaseType(QualType T) {
 
+QualType DeclPrinter::GetBaseType(QualType T) {
+  // FIXME: This should be on the Type class!
   QualType BaseType = T;
   while (!BaseType->isSpecifierType()) {
     if (const PointerType *PTy = BaseType->getAs<PointerType>())
@@ -302,7 +321,7 @@ QualType DeclPrinter::GetBaseType(QualType T) {
     else if (const ParenType *PTy = BaseType->getAs<ParenType>())
       BaseType = PTy->desugar();
     else
-
+      // This must be a syntax error.
       break;
   }
   return BaseType;
@@ -368,8 +387,9 @@ static DeclPrinter::AttrPosAsWritten getPosAsWritten(const Attr *A,
   return DeclPrinter::AttrPosAsWritten::Right;
 }
 
+// returns true if an attribute was printed.
 bool DeclPrinter::prettyPrintAttributes(const Decl *D,
-                                        AttrPosAsWritten Pos ) {
+                                        AttrPosAsWritten Pos /*=Default*/) {
   bool hasPrinted = false;
 
   if (D->hasAttrs()) {
@@ -377,7 +397,7 @@ bool DeclPrinter::prettyPrintAttributes(const Decl *D,
     for (auto *A : Attrs) {
       if (A->isInherited() || A->isImplicit())
         continue;
-
+      // Print out the keyword attributes, they aren't regular attributes.
       if (Policy.PolishForDeclaration && !A->isKeywordAttribute())
         continue;
       switch (A->getKind()) {
@@ -426,7 +446,9 @@ void DeclPrinter::prettyPrintPragmas(Decl *D) {
 }
 
 void DeclPrinter::printDeclType(QualType T, StringRef DeclName, bool Pack) {
-
+  // Normally, a PackExpansionType is written as T[3]... (for instance, as a
+  // template argument), but if it is the type of a declaration, the ellipsis
+  // is placed before the name being declared.
   if (auto *PET = T->getAs<PackExpansionType>()) {
     Pack = true;
     T = PET->getPattern();
@@ -526,6 +548,10 @@ void DeclPrinter::PrintConstructorInitializers(CXXConstructorDecl *CDecl,
   }
 }
 
+//----------------------------------------------------------------------------
+// Common C declarations
+//----------------------------------------------------------------------------
+
 void DeclPrinter::VisitDeclContext(DeclContext *DC, bool Indent) {
   if (Policy.TerseOutput)
     return;
@@ -537,17 +563,34 @@ void DeclPrinter::VisitDeclContext(DeclContext *DC, bool Indent) {
   for (DeclContext::decl_iterator D = DC->decls_begin(), DEnd = DC->decls_end();
        D != DEnd; ++D) {
 
+    // Don't print ObjCIvarDecls, as they are printed when visiting the
+    // containing ObjCInterfaceDecl.
     if (isa<ObjCIvarDecl>(*D))
       continue;
 
+    // Skip over implicit declarations in pretty-printing mode.
     if (D->isImplicit())
       continue;
 
+    // Don't print implicit specializations, as they are printed when visiting
+    // corresponding templates.
     if (auto *FD = dyn_cast<FunctionDecl>(*D))
       if (FD->getTemplateSpecializationKind() == TSK_ImplicitInstantiation &&
           !isa<ClassTemplateSpecializationDecl>(DC))
         continue;
 
+    // The next bits of code handle stuff like "struct {int x;} a,b"; we're
+    // forced to merge the declarations because there's no other way to
+    // refer to the struct in question.  When that struct is named instead, we
+    // also need to merge to avoid splitting off a stand-alone struct
+    // declaration that produces the warning ext_no_declarators in some
+    // contexts.
+    //
+    // This limited merging is safe without a bunch of other checks because it
+    // only merges declarations directly referring to the tag, not typedefs.
+    //
+    // Check whether the current declaration should be grouped with a previous
+    // non-free-standing tag declaration.
     QualType CurDeclType = getDeclType(*D);
     if (!Decls.empty() && !CurDeclType.isNull()) {
       QualType BaseType = GetBaseType(CurDeclType);
@@ -558,9 +601,12 @@ void DeclPrinter::VisitDeclContext(DeclContext *DC, bool Indent) {
       }
     }
 
+    // If we have a merged group waiting to be handled, handle it now.
     if (!Decls.empty())
       ProcessDeclGroup(Decls);
 
+    // If the current declaration is not a free standing declaration, save it
+    // so we can merge it with the subsequent declaration(s) using it.
     if (isa<TagDecl>(*D) && !cast<TagDecl>(*D)->isFreeStanding()) {
       Decls.push_back(*D);
       continue;
@@ -578,6 +624,7 @@ void DeclPrinter::VisitDeclContext(DeclContext *DC, bool Indent) {
     this->Indent();
     Base::Visit(*D);
 
+    // FIXME: Need to be able to tell the DeclPrinter when
     const char *Terminator = nullptr;
     if (isa<OMPThreadPrivateDecl>(*D) || isa<OMPDeclareReductionDecl>(*D) ||
         isa<OMPDeclareMapperDecl>(*D) || isa<OMPRequiresDecl>(*D) ||
@@ -614,10 +661,12 @@ void DeclPrinter::VisitDeclContext(DeclContext *DC, bool Indent) {
           cast<FunctionDecl>(*D)->doesThisDeclarationHaveABody()) ||
          (isa<FunctionTemplateDecl>(*D) &&
           cast<FunctionTemplateDecl>(*D)->getTemplatedDecl()->doesThisDeclarationHaveABody())))
-      ;
+      ; // StmtPrinter already added '\n' after CompoundStmt.
     else
       Out << "\n";
 
+    // Declare target attribute is special one, natural spelling for the pragma
+    // assumes "ending" construct so print it here.
     if (D->hasAttr<OMPDeclareTargetDeclAttr>())
       Out << "#pragma omp end declare target\n";
   }
@@ -821,7 +870,8 @@ void DeclPrinter::VisitFunctionDecl(FunctionDecl *D) {
         if (D->getNumParams()) POut << ", ";
         POut << "...";
       } else if (!D->getNumParams() && !Context.getLangOpts().CPlusPlus) {
-
+        // The function has a prototype, so it needs to retain the prototype
+        // in C.
         POut << "void";
       }
     } else if (D->doesThisDeclarationHaveABody() && !D->hasPrototype()) {
@@ -922,7 +972,8 @@ void DeclPrinter::VisitFunctionDecl(FunctionDecl *D) {
   else if (D->doesThisDeclarationHaveABody()) {
     if (!Policy.TerseOutput) {
       if (!D->hasPrototype() && D->getNumParams()) {
-
+        // This is a K&R function definition, so we need to print the
+        // parameters.
         Out << '\n';
         Indentation += Policy.Indentation;
         for (unsigned i = 0, e = D->getNumParams(); i != e; ++i) {
@@ -969,7 +1020,7 @@ void DeclPrinter::VisitFriendDecl(FriendDecl *D) {
 }
 
 void DeclPrinter::VisitFieldDecl(FieldDecl *D) {
-
+  // FIXME: add printing of pragma attributes if required.
   if (!Policy.SuppressSpecifiers && D->isMutable())
     Out << "mutable ";
   if (!Policy.SuppressSpecifiers && D->isModulePrivate())
@@ -1055,7 +1106,7 @@ void DeclPrinter::VisitVarDecl(VarDecl *D) {
   if (!Policy.SuppressInitializers && Init) {
     bool ImplicitInit = false;
     if (D->isCXXForRangeDecl()) {
-
+      // FIXME: We should print the range expression instead.
       ImplicitInit = true;
     } else if (CXXConstructExpr *Construct =
                    dyn_cast<CXXConstructExpr>(Init->IgnoreImplicit())) {
@@ -1113,6 +1164,9 @@ void DeclPrinter::VisitStaticAssertDecl(StaticAssertDecl *D) {
   Out << ")";
 }
 
+//----------------------------------------------------------------------------
+// C++ declarations
+//----------------------------------------------------------------------------
 void DeclPrinter::VisitNamespaceDecl(NamespaceDecl *D) {
   if (D->isInline())
     Out << "inline ";
@@ -1145,12 +1199,14 @@ void DeclPrinter::VisitEmptyDecl(EmptyDecl *D) {
 }
 
 void DeclPrinter::VisitCXXRecordDecl(CXXRecordDecl *D) {
-
+  // FIXME: add printing of pragma attributes if required.
   if (!Policy.SuppressSpecifiers && D->isModulePrivate())
     Out << "__module_private__ ";
 
   Out << D->getKindName() << ' ';
 
+  // FIXME: Move before printing the decl kind to match the behavior of the
+  // attribute printing for variables and function where they are printed first.
   if (prettyPrintAttributes(D, AttrPosAsWritten::Left))
     Out << ' ';
 
@@ -1175,7 +1231,7 @@ void DeclPrinter::VisitCXXRecordDecl(CXXRecordDecl *D) {
 
   if (D->isCompleteDefinition()) {
     Out << ' ';
-
+    // Print the base classes
     if (D->getNumBases()) {
       Out << ": ";
       for (CXXRecordDecl::base_class_iterator Base = D->bases_begin(),
@@ -1199,6 +1255,8 @@ void DeclPrinter::VisitCXXRecordDecl(CXXRecordDecl *D) {
       Out << ' ';
     }
 
+    // Print the class definition
+    // FIXME: Doesn't print access specifiers, e.g., "public:"
     if (Policy.TerseOutput) {
       Out << "{}";
     } else {
@@ -1232,6 +1290,7 @@ void DeclPrinter::printTemplateParameters(const TemplateParameterList *Params,
                                           bool OmitTemplateKW) {
   assert(Params);
 
+  // Don't print invented template parameter lists.
   if (!Params->empty() && Params->getParam(0)->isImplicit())
     return;
 
@@ -1255,7 +1314,7 @@ void DeclPrinter::printTemplateParameters(const TemplateParameterList *Params,
       VisitNonTypeTemplateParmDecl(NTTP);
     } else if (const auto *TTPD = dyn_cast<TemplateTemplateParmDecl>(Param)) {
       VisitTemplateDecl(TTPD);
-
+      // FIXME: print the default argument, if present.
     }
   }
 
@@ -1278,7 +1337,7 @@ void DeclPrinter::printTemplateArguments(ArrayRef<TemplateArgument> Args,
     if (I)
       Out << ", ";
     if (!Params)
-      Args[I].print(Policy, Out,  true);
+      Args[I].print(Policy, Out, /*IncludeType*/ true);
     else
       Args[I].print(Policy, Out,
                     TemplateParameterList::shouldIncludeTypeForArgument(
@@ -1294,7 +1353,7 @@ void DeclPrinter::printTemplateArguments(ArrayRef<TemplateArgumentLoc> Args,
     if (I)
       Out << ", ";
     if (!Params)
-      Args[I].getArgument().print(Policy, Out,  true);
+      Args[I].getArgument().print(Policy, Out, /*IncludeType*/ true);
     else
       Args[I].getArgument().print(
           Policy, Out,
@@ -1336,17 +1395,20 @@ void DeclPrinter::VisitTemplateDecl(const TemplateDecl *D) {
 
 void DeclPrinter::VisitFunctionTemplateDecl(FunctionTemplateDecl *D) {
   prettyPrintPragmas(D->getTemplatedDecl());
-
+  // Print any leading template parameter lists.
   if (const FunctionDecl *FD = D->getTemplatedDecl()) {
     for (unsigned I = 0, NumTemplateParams = FD->getNumTemplateParameterLists();
          I < NumTemplateParams; ++I)
       printTemplateParameters(FD->getTemplateParameterList(I));
   }
   VisitRedeclarableTemplateDecl(D);
-
+  // Declare target attribute is special one, natural spelling for the pragma
+  // assumes "ending" construct so print it here.
   if (D->getTemplatedDecl()->hasAttr<OMPDeclareTargetDeclAttr>())
     Out << "#pragma omp end declare target\n";
 
+  // Never print "instantiations" for deduction guides (they don't really
+  // have them).
   if (PrintInstantiation &&
       !isa<CXXDeductionGuideDecl>(D->getTemplatedDecl())) {
     FunctionDecl *PrevDecl = D->getTemplatedDecl();
@@ -1390,6 +1452,10 @@ void DeclPrinter::VisitClassTemplatePartialSpecializationDecl(
   printTemplateParameters(D->getTemplateParameters());
   VisitCXXRecordDecl(D);
 }
+
+//----------------------------------------------------------------------------
+// Objective-C declarations
+//----------------------------------------------------------------------------
 
 void DeclPrinter::PrintObjCMethodType(ASTContext &Ctx,
                                       Decl::ObjCDeclQualifier Quals,
@@ -1461,7 +1527,7 @@ void DeclPrinter::VisitObjCMethodDecl(ObjCMethodDecl *OMD) {
   std::string name = OMD->getSelector().getAsString();
   std::string::size_type pos, lastPos = 0;
   for (const auto *PI : OMD->parameters()) {
-
+    // FIXME: selector is missing here!
     pos = name.find_first_of(':', lastPos);
     if (lastPos != 0)
       Out << " ";
@@ -1550,6 +1616,7 @@ void DeclPrinter::VisitObjCInterfaceDecl(ObjCInterfaceDecl *OID) {
   if (SID)
     Out << " : " << QualType(OID->getSuperClassType(), 0).getAsString(Policy);
 
+  // Protocols?
   const ObjCList<ObjCProtocolDecl> &Protocols = OID->getReferencedProtocols();
   if (!Protocols.empty()) {
     for (ObjCList<ObjCProtocolDecl>::iterator I = Protocols.begin(),
@@ -1579,7 +1646,7 @@ void DeclPrinter::VisitObjCInterfaceDecl(ObjCInterfaceDecl *OID) {
   if (!eolnOut)
     Out << "\n";
   Out << "@end";
-
+  // FIXME: implement the rest...
 }
 
 void DeclPrinter::VisitObjCProtocolDecl(ObjCProtocolDecl *PID) {
@@ -1587,7 +1654,7 @@ void DeclPrinter::VisitObjCProtocolDecl(ObjCProtocolDecl *PID) {
     Out << "@protocol " << *PID << ";\n";
     return;
   }
-
+  // Protocols?
   const ObjCList<ObjCProtocolDecl> &Protocols = PID->getReferencedProtocols();
   if (!Protocols.empty()) {
     Out << "@protocol " << *PID;
@@ -1611,7 +1678,7 @@ void DeclPrinter::VisitObjCCategoryImplDecl(ObjCCategoryImplDecl *PID) {
 
   VisitDeclContext(PID, false);
   Out << "@end";
-
+  // FIXME: implement the rest...
 }
 
 void DeclPrinter::VisitObjCCategoryDecl(ObjCCategoryDecl *PID) {
@@ -1637,6 +1704,7 @@ void DeclPrinter::VisitObjCCategoryDecl(ObjCCategoryDecl *PID) {
   VisitDeclContext(PID, false);
   Out << "@end";
 
+  // FIXME: implement the rest...
 }
 
 void DeclPrinter::VisitObjCCompatibleAliasDecl(ObjCCompatibleAliasDecl *AID) {
@@ -1644,6 +1712,15 @@ void DeclPrinter::VisitObjCCompatibleAliasDecl(ObjCCompatibleAliasDecl *AID) {
       << ' ' << *AID->getClassInterface() << ";\n";
 }
 
+/// PrintObjCPropertyDecl - print a property declaration.
+///
+/// Print attributes in the following order:
+/// - class
+/// - nonatomic | atomic
+/// - assign | retain | strong | copy | weak | unsafe_unretained
+/// - readwrite | readonly
+/// - getter & setter
+/// - nullability
 void DeclPrinter::VisitObjCPropertyDecl(ObjCPropertyDecl *PDecl) {
   if (PDecl->getPropertyImplementation() == ObjCPropertyDecl::Required)
     Out << "@required\n";
@@ -1739,7 +1816,7 @@ void DeclPrinter::VisitObjCPropertyDecl(ObjCPropertyDecl *PDecl) {
       }
     }
 
-    (void) first;
+    (void) first; // Silence dead store warning due to idiomatic code.
     Out << ")";
   }
   std::string TypeStr = PDecl->getASTContext().getUnqualifiedObjCPointerType(T).
@@ -1769,6 +1846,8 @@ void DeclPrinter::VisitUsingDecl(UsingDecl *D) {
     Out << "typename ";
   D->getQualifier()->print(Out, Policy);
 
+  // Use the correct record name when the using declaration is used for
+  // inheriting constructors.
   for (const auto *Shadow : D->shadows()) {
     if (const auto *ConstructorShadow =
             dyn_cast<ConstructorUsingShadowDecl>(Shadow)) {
@@ -1799,7 +1878,7 @@ void DeclPrinter::VisitUnresolvedUsingValueDecl(UnresolvedUsingValueDecl *D) {
 }
 
 void DeclPrinter::VisitUsingShadowDecl(UsingShadowDecl *D) {
-
+  // ignore
 }
 
 void DeclPrinter::VisitOMPThreadPrivateDecl(OMPThreadPrivateDecl *D) {
@@ -1944,7 +2023,7 @@ void DeclPrinter::VisitTemplateTypeParmDecl(const TemplateTypeParmDecl *TTP) {
   if (TTP->hasDefaultArgument()) {
     Out << " = ";
     TTP->getDefaultArgument().getArgument().print(Policy, Out,
-                                                  false);
+                                                  /*IncludeType=*/false);
   }
 }
 
@@ -1959,10 +2038,17 @@ void DeclPrinter::VisitNonTypeTemplateParmDecl(
   if (NTTP->hasDefaultArgument()) {
     Out << " = ";
     NTTP->getDefaultArgument().getArgument().print(Policy, Out,
-                                                   false);
+                                                   /*IncludeType=*/false);
   }
 }
 
+
+//===----------------------------------------------------------------------===//
+//  Stmt printing methods.
+//===----------------------------------------------------------------------===//
+
+/// PrintRawCompoundStmt - Print a compound stmt without indenting the {, and
+/// with no newline after the }.
 void DeclPrinter::PrintRawCompoundStmt(CompoundStmt *Node) {
   assert(Node && "Compound statement cannot be null");
   Out << "{" << NL;
@@ -2291,6 +2377,7 @@ void DeclPrinter::VisitGCCAsmStmt(GCCAsmStmt *Node) {
   Out << "(";
   VisitStringLiteral(Node->getAsmString());
 
+  // Outputs
   if (Node->getNumOutputs() != 0 || Node->getNumInputs() != 0 ||
       Node->getNumClobbers() != 0 || Node->getNumLabels() != 0)
     Out << " : ";
@@ -2311,6 +2398,7 @@ void DeclPrinter::VisitGCCAsmStmt(GCCAsmStmt *Node) {
     Out << ")";
   }
 
+  // Inputs
   if (Node->getNumInputs() != 0 || Node->getNumClobbers() != 0 ||
       Node->getNumLabels() != 0)
     Out << " : ";
@@ -2331,6 +2419,7 @@ void DeclPrinter::VisitGCCAsmStmt(GCCAsmStmt *Node) {
     Out << ")";
   }
 
+  // Clobbers
   if (Node->getNumClobbers() != 0 || Node->getNumLabels())
     Out << " : ";
 
@@ -2341,6 +2430,7 @@ void DeclPrinter::VisitGCCAsmStmt(GCCAsmStmt *Node) {
     VisitStringLiteral(Node->getClobberStringLiteral(i));
   }
 
+  // Labels
   if (Node->getNumLabels() != 0)
     Out << " : ";
 
@@ -2355,7 +2445,7 @@ void DeclPrinter::VisitGCCAsmStmt(GCCAsmStmt *Node) {
 }
 
 void DeclPrinter::VisitMSAsmStmt(MSAsmStmt *Node) {
-
+  // FIXME: Implement MS style inline asm statement printer.
   Indent() << "__asm ";
   if (Node->hasBraces())
     Out << "{" << NL;
@@ -2399,7 +2489,7 @@ void DeclPrinter::VisitObjCAtFinallyStmt(ObjCAtFinallyStmt *Node) {
 }
 
 void DeclPrinter::VisitObjCAtCatchStmt (ObjCAtCatchStmt *Node) {
-  Indent() << "@catch (...) {  } " << NL;
+  Indent() << "@catch (...) { /* todo */ } " << NL;
 }
 
 void DeclPrinter::VisitObjCAtThrowStmt(ObjCAtThrowStmt *Node) {
@@ -2500,6 +2590,10 @@ void DeclPrinter::VisitSEHLeaveStmt(SEHLeaveStmt *Node) {
   Indent() << "__leave;";
   if (Policy.IncludeNewlines) Out << NL;
 }
+
+//===----------------------------------------------------------------------===//
+//  OpenMP directives printing methods
+//===----------------------------------------------------------------------===//
 
 void DeclPrinter::VisitOMPCanonicalLoop(OMPCanonicalLoop *Node) {
   PrintStmt(Node->getLoopStmt());
@@ -2696,13 +2790,13 @@ void DeclPrinter::VisitOMPTargetDataDirective(OMPTargetDataDirective *Node) {
 void DeclPrinter::VisitOMPTargetEnterDataDirective(
     OMPTargetEnterDataDirective *Node) {
   Indent() << "#pragma omp target enter data";
-  PrintOMPExecutableDirective(Node, true);
+  PrintOMPExecutableDirective(Node, /*ForceNoStmt=*/true);
 }
 
 void DeclPrinter::VisitOMPTargetExitDataDirective(
     OMPTargetExitDataDirective *Node) {
   Indent() << "#pragma omp target exit data";
-  PrintOMPExecutableDirective(Node, true);
+  PrintOMPExecutableDirective(Node, /*ForceNoStmt=*/true);
 }
 
 void DeclPrinter::VisitOMPTargetParallelDirective(
@@ -2802,7 +2896,7 @@ void DeclPrinter::VisitOMPDistributeDirective(OMPDistributeDirective *Node) {
 void DeclPrinter::VisitOMPTargetUpdateDirective(
     OMPTargetUpdateDirective *Node) {
   Indent() << "#pragma omp target update";
-  PrintOMPExecutableDirective(Node, true);
+  PrintOMPExecutableDirective(Node, /*ForceNoStmt=*/true);
 }
 
 void DeclPrinter::VisitOMPDistributeParallelForDirective(
@@ -2931,6 +3025,9 @@ void DeclPrinter::VisitOMPTargetParallelGenericLoopDirective(
   PrintOMPExecutableDirective(Node);
 }
 
+//===----------------------------------------------------------------------===//
+//  OpenACC construct printing methods
+//===----------------------------------------------------------------------===//
 void DeclPrinter::VisitOpenACCComputeConstruct(OpenACCComputeConstruct *S) {
   Indent() << "#pragma acc " << S->getDirectiveKind();
 
@@ -2956,6 +3053,10 @@ void DeclPrinter::VisitOpenACCLoopConstruct(OpenACCLoopConstruct *S) {
 
   PrintStmt(S->getLoop());
 }
+
+//===----------------------------------------------------------------------===//
+//  Expr printing methods.
+//===----------------------------------------------------------------------===//
 
 void DeclPrinter::VisitSourceLocExpr(SourceLocExpr *Node) {
   Out << Node->getBuiltinStr() << "()";
@@ -3091,6 +3192,7 @@ void DeclPrinter::VisitIntegerLiteral(IntegerLiteral *Node) {
     return;
   }
 
+  // Emit suffixes.  Integer literals are always a builtin integer type.
   switch (Node->getType()->castAs<BuiltinType>()->getKind()) {
   default: llvm_unreachable("Unexpected type for integer literal!");
   case BuiltinType::Char_S:
@@ -3099,24 +3201,24 @@ void DeclPrinter::VisitIntegerLiteral(IntegerLiteral *Node) {
   case BuiltinType::SChar:     Out << "i8"; break;
   case BuiltinType::Short:     Out << "i16"; break;
   case BuiltinType::UShort:    Out << "Ui16"; break;
-  case BuiltinType::Int:       break;
+  case BuiltinType::Int:       break; // no suffix.
   case BuiltinType::UInt:      Out << 'U'; break;
   case BuiltinType::Long:      Out << 'L'; break;
   case BuiltinType::ULong:     Out << "UL"; break;
   case BuiltinType::LongLong:  Out << "LL"; break;
   case BuiltinType::ULongLong: Out << "ULL"; break;
   case BuiltinType::Int128:
-    break;
+    break; // no suffix.
   case BuiltinType::UInt128:
-    break;
+    break; // no suffix.
   case BuiltinType::WChar_S:
   case BuiltinType::WChar_U:
-    break;
+    break; // no suffix
   }
 }
 
 void DeclPrinter::VisitFixedPointLiteral(FixedPointLiteral *Node) {
-  Out << Node->getValueAsString(10);
+  Out << Node->getValueAsString(/*Radix=*/10);
 
   switch (Node->getType()->castAs<BuiltinType>()->getKind()) {
     default: llvm_unreachable("Unexpected type for fixed point literal!");
@@ -3141,16 +3243,17 @@ static void PrintFloatingLiteral(raw_ostream &Out, FloatingLiteral *Node,
   Node->getValue().toString(Str);
   Out << Str;
   if (Str.find_first_not_of("-0123456789") == StringRef::npos)
-    Out << '.';
+    Out << '.'; // Trailing dot in order to separate from ints.
 
   if (!PrintSuffix)
     return;
 
+  // Emit suffixes.  Float literals are always a builtin float type.
   switch (Node->getType()->castAs<BuiltinType>()->getKind()) {
   default: llvm_unreachable("Unexpected type for float literal!");
-  case BuiltinType::Half:       break;
-  case BuiltinType::Ibm128:     break;
-  case BuiltinType::Double:     break;
+  case BuiltinType::Half:       break; // FIXME: suffix?
+  case BuiltinType::Ibm128:     break; // FIXME: No suffix for ibm128 literal
+  case BuiltinType::Double:     break; // no suffix.
   case BuiltinType::Float16:    Out << "F16"; break;
   case BuiltinType::Float:      Out << 'F'; break;
   case BuiltinType::LongDouble: Out << 'L'; break;
@@ -3159,7 +3262,7 @@ static void PrintFloatingLiteral(raw_ostream &Out, FloatingLiteral *Node,
 }
 
 void DeclPrinter::VisitFloatingLiteral(FloatingLiteral *Node) {
-  PrintFloatingLiteral(Out, Node, true);
+  PrintFloatingLiteral(Out, Node, /*PrintSuffix=*/true);
 }
 
 void DeclPrinter::VisitImaginaryLiteral(ImaginaryLiteral *Node) {
@@ -3181,6 +3284,8 @@ void DeclPrinter::VisitUnaryOperator(UnaryOperator *Node) {
   if (!Node->isPostfix()) {
     Out << UnaryOperator::getOpcodeStr(Node->getOpcode());
 
+    // Print a space if this is an "identifier operator" like __real, or if
+    // it might be concatenated incorrectly like '+'.
     switch (Node->getOpcode()) {
     default: break;
     case UO_Real:
@@ -3209,7 +3314,7 @@ void DeclPrinter::VisitOffsetOfExpr(OffsetOfExpr *Node) {
   for (unsigned i = 0, n = Node->getNumComponents(); i < n; ++i) {
     OffsetOfNode ON = Node->getComponent(i);
     if (ON.getKind() == OffsetOfNode::Array) {
-
+      // Array node
       Out << "[";
       PrintExpr(Node->getIndexExpr(ON.getArrayExprIndex()));
       Out << "]";
@@ -3217,9 +3322,11 @@ void DeclPrinter::VisitOffsetOfExpr(OffsetOfExpr *Node) {
       continue;
     }
 
+    // Skip implicit base indirections.
     if (ON.getKind() == OffsetOfNode::Base)
       continue;
 
+    // Field or identifier node.
     const IdentifierInfo *Id = ON.getFieldName();
     if (!Id)
       continue;
@@ -3346,7 +3453,7 @@ void DeclPrinter::VisitOMPIteratorExpr(OMPIteratorExpr *Node) {
 void DeclPrinter::PrintCallArgs(CallExpr *Call) {
   for (unsigned i = 0, e = Call->getNumArgs(); i != e; ++i) {
     if (isa<CXXDefaultArgExpr>(Call->getArg(i))) {
-
+      // Don't print any defaulted arguments
       break;
     }
 
@@ -3428,12 +3535,12 @@ void DeclPrinter::VisitCompoundLiteralExpr(CompoundLiteralExpr *Node) {
 }
 
 void DeclPrinter::VisitImplicitCastExpr(ImplicitCastExpr *Node) {
-
+  // No need to print anything, simply forward to the subexpression.
   PrintExpr(Node->getSubExpr());
 }
 
 void DeclPrinter::VisitBinaryOperator(BinaryOperator *Node) {
-
+/****************************************************************************/
   if (Node->getOpcode() == BO_LMG) {
     Out << "@Expression";
     std::vector<std::vector<int>> shapes(calc->getNumParams(),
@@ -3441,13 +3548,13 @@ void DeclPrinter::VisitBinaryOperator(BinaryOperator *Node) {
     for (int paramCount = 0; paramCount < calc->getNumParams(); paramCount++) {
       dacppTranslator::Param *param = calc->getParam(paramCount);
       for (int dimCount = 0; dimCount < param->getDim(); dimCount++) {
-
+        // shapes[paramCount].push_back(param->getShape(dimCount));
       }
     }
     calc->setExpr(Node, shapes);
     return;
   }
-
+/****************************************************************************/
   PrintExpr(Node->getLHS());
   Out << " " << BinaryOperator::getOpcodeStr(Node->getOpcode()) << " ";
   PrintExpr(Node->getRHS());
@@ -3466,6 +3573,8 @@ void DeclPrinter::VisitConditionalOperator(ConditionalOperator *Node) {
   Out << " : ";
   PrintExpr(Node->getRHS());
 }
+
+// GNU extensions.
 
 void
 DeclPrinter::VisitBinaryConditionalOperator(BinaryConditionalOperator *Node) {
@@ -3533,7 +3642,8 @@ void DeclPrinter::VisitInitListExpr(InitListExpr* Node) {
 }
 
 void DeclPrinter::VisitArrayInitLoopExpr(ArrayInitLoopExpr *Node) {
-
+  // There's no way to express this expression in any of our supported
+  // languages, so just emit something terse and (hopefully) clear.
   Out << "{";
   PrintExpr(Node->getSubExpr());
   Out << "}";
@@ -3587,26 +3697,26 @@ void DeclPrinter::VisitDesignatedInitExpr(DesignatedInitExpr *Node) {
 void DeclPrinter::VisitDesignatedInitUpdateExpr(
     DesignatedInitUpdateExpr *Node) {
   Out << "{";
-  Out << "";
+  Out << "/*base*/";
   PrintExpr(Node->getBase());
   Out << ", ";
 
-  Out << "";
+  Out << "/*updater*/";
   PrintExpr(Node->getUpdater());
   Out << "}";
 }
 
 void DeclPrinter::VisitNoInitExpr(NoInitExpr *Node) {
-  Out << "";
+  Out << "/*no init*/";
 }
 
 void DeclPrinter::VisitImplicitValueInitExpr(ImplicitValueInitExpr *Node) {
   if (Node->getType()->getAsCXXRecordDecl()) {
-    Out << "";
+    Out << "/*implicit*/";
     Node->getType().print(Out, Policy);
     Out << "()";
   } else {
-    Out << "(";
+    Out << "/*implicit*/(";
     Node->getType().print(Out, Policy);
     Out << ')';
     if (Node->getType()->isRecordType())
@@ -3640,6 +3750,7 @@ void DeclPrinter::VisitAtomicExpr(AtomicExpr *Node) {
   }
   Out << Name;
 
+  // AtomicExpr stores its subexpressions in a permuted order.
   PrintExpr(Node->getPtr());
   if (Node->getOp() != AtomicExpr::AO__c11_atomic_load &&
       Node->getOp() != AtomicExpr::AO__atomic_load_n &&
@@ -3671,6 +3782,7 @@ void DeclPrinter::VisitAtomicExpr(AtomicExpr *Node) {
   Out << ")";
 }
 
+// C++
 void DeclPrinter::VisitCXXOperatorCallExpr(CXXOperatorCallExpr *Node) {
   OverloadedOperatorKind Kind = Node->getOperator();
   if (Kind == OO_PlusPlus || Kind == OO_MinusMinus) {
@@ -3706,7 +3818,7 @@ void DeclPrinter::VisitCXXOperatorCallExpr(CXXOperatorCallExpr *Node) {
 }
 
 void DeclPrinter::VisitCXXMemberCallExpr(CXXMemberCallExpr *Node) {
-
+/****************************************************************************/
 std::string Msg;
 llvm::raw_string_ostream SS(Msg);
 if (const auto *Call = dyn_cast<CallExpr>(Node)) {
@@ -3735,7 +3847,9 @@ if (const auto *Call = dyn_cast<CallExpr>(Node)) {
     }
   }
 }
+/****************************************************************************/
 
+// If we have a conversion operator call only print the argument.
 CXXMethodDecl *MD = Node->getMethodDecl();
 if (isa_and_nonnull<CXXConversionDecl>(MD)) {
   PrintExpr(Node->getImplicitObjectArgument());
@@ -3867,15 +3981,15 @@ void DeclPrinter::VisitUserDefinedLiteral(UserDefinedLiteral *Node) {
     break;
   }
   case UserDefinedLiteral::LOK_Integer: {
-
+    // Print integer literal without suffix.
     const auto *Int = cast<IntegerLiteral>(Node->getCookedLiteral());
-    Out << toString(Int->getValue(), 10, false);
+    Out << toString(Int->getValue(), 10, /*isSigned*/false);
     break;
   }
   case UserDefinedLiteral::LOK_Floating: {
-
+    // Print floating literal without suffix.
     auto *Float = cast<FloatingLiteral>(Node->getCookedLiteral());
-    PrintFloatingLiteral(Out, Float, false);
+    PrintFloatingLiteral(Out, Float, /*PrintSuffix=*/false);
     break;
   }
   case UserDefinedLiteral::LOK_String:
@@ -3908,11 +4022,11 @@ void DeclPrinter::VisitCXXThrowExpr(CXXThrowExpr *Node) {
 }
 
 void DeclPrinter::VisitCXXDefaultArgExpr(CXXDefaultArgExpr *Node) {
-
+  // Nothing to print: we picked up the default argument.
 }
 
 void DeclPrinter::VisitCXXDefaultInitExpr(CXXDefaultInitExpr *Node) {
-
+  // Nothing to print: we picked up the default initializer.
 }
 
 void DeclPrinter::VisitCXXFunctionalCastExpr(CXXFunctionalCastExpr *Node) {
@@ -3920,12 +4034,14 @@ void DeclPrinter::VisitCXXFunctionalCastExpr(CXXFunctionalCastExpr *Node) {
   auto *Auto = TargetType->getContainedDeducedType();
   bool Bare = Auto && Auto->isDeduced();
 
+  // Parenthesize deduced casts.
   if (Bare)
     Out << '(';
   TargetType.print(Out, Policy);
   if (Bare)
     Out << ')';
 
+  // No extra braces surrounding the inner construct.
   if (!Node->isListInitialization())
     Out << '(';
   PrintExpr(Node->getSubExpr());
@@ -3940,7 +4056,7 @@ void DeclPrinter::VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *Node) {
 void DeclPrinter::VisitCXXTemporaryObjectExpr(CXXTemporaryObjectExpr *Node) {
   Node->getType().print(Out, Policy);
   if (Node->isStdInitListInitialization())
-    ;
+    /* Nothing to do; braces are part of creating the std::initializer_list. */;
   else if (Node->isListInitialization())
     Out << "{";
   else
@@ -3955,7 +4071,7 @@ void DeclPrinter::VisitCXXTemporaryObjectExpr(CXXTemporaryObjectExpr *Node) {
     PrintExpr(*Arg);
   }
   if (Node->isStdInitListInitialization())
-    ;
+    /* See above. */;
   else if (Node->isListInitialization())
     Out << "}";
   else
@@ -4017,7 +4133,7 @@ void DeclPrinter::VisitLambdaExpr(LambdaExpr *Node) {
       Out << "...";
 
     if (Node->isInitCapture(C)) {
-
+      // Init captures are always VarDecl.
       auto *D = cast<VarDecl>(C->getCapturedVar());
 
       llvm::StringRef Pre;
@@ -4040,7 +4156,7 @@ void DeclPrinter::VisitLambdaExpr(LambdaExpr *Node) {
   if (!Node->getExplicitTemplateParameters().empty()) {
     Node->getTemplateParameterList()->print(
         Out, Node->getLambdaClass()->getASTContext(),
-        true);
+        /*OmitTemplateKW*/true);
   }
 
   if (Node->hasExplicitParameters()) {
@@ -4072,12 +4188,16 @@ void DeclPrinter::VisitLambdaExpr(LambdaExpr *Node) {
     auto *Proto = Method->getType()->castAs<FunctionProtoType>();
     Proto->printExceptionSpecification(Out, Policy);
 
+    // FIXME: Attributes
+
+    // Print the trailing return type if it was specified in the source.
     if (Node->hasExplicitResultType()) {
       Out << " -> ";
       Proto->getReturnType().print(Out, Policy);
     }
   }
 
+  // Print the body.
   Out << ' ';
   if (Policy.TerseOutput)
     Out << "{}";
@@ -4166,7 +4286,7 @@ void DeclPrinter::VisitCXXConstructExpr(CXXConstructExpr *E) {
 
   for (unsigned i = 0, e = E->getNumArgs(); i != e; ++i) {
     if (isa<CXXDefaultArgExpr>(E->getArg(i))) {
-
+      // Don't print any defaulted arguments
       break;
     }
 
@@ -4179,7 +4299,7 @@ void DeclPrinter::VisitCXXConstructExpr(CXXConstructExpr *E) {
 }
 
 void DeclPrinter::VisitCXXInheritedCtorInitExpr(CXXInheritedCtorInitExpr *E) {
-
+  // Parens are printed by the surrounding context.
   Out << "<forwarded>";
 }
 
@@ -4188,7 +4308,7 @@ void DeclPrinter::VisitCXXStdInitializerListExpr(CXXStdInitializerListExpr *E) {
 }
 
 void DeclPrinter::VisitExprWithCleanups(ExprWithCleanups *E) {
-
+  // Just forward to the subexpression.
   PrintExpr(E->getSubExpr());
 }
 
@@ -4382,6 +4502,8 @@ void DeclPrinter::VisitRequiresExpr(RequiresExpr *E) {
   Out << "}";
 }
 
+// C++ Coroutines
+
 void DeclPrinter::VisitCoroutineBodyStmt(CoroutineBodyStmt *S) {
   Visit(S->getBody());
 }
@@ -4409,6 +4531,8 @@ void DeclPrinter::VisitCoyieldExpr(CoyieldExpr *S) {
   Out << "co_yield ";
   PrintExpr(S->getOperand());
 }
+
+// Obj-C
 
 void DeclPrinter::VisitObjCStringLiteral(ObjCStringLiteral *Node) {
   Out << "@";
@@ -4493,7 +4617,7 @@ void DeclPrinter::VisitObjCMessageExpr(ObjCMessageExpr *Mess) {
         else
            Out << ":";
       }
-      else Out << ", ";
+      else Out << ", "; // Handle variadic methods.
 
       PrintExpr(Mess->getArg(i));
     }
@@ -4550,7 +4674,7 @@ void DeclPrinter::VisitOpaqueValueExpr(OpaqueValueExpr *Node) {
 }
 
 void DeclPrinter::VisitTypoExpr(TypoExpr *Node) {
-
+  // TODO: Print something reasonable for a TypoExpr, if necessary.
   llvm_unreachable("Cannot print TypoExpr nodes");
 }
 
@@ -4573,15 +4697,18 @@ void DeclPrinter::VisitAsTypeExpr(AsTypeExpr *Node) {
   Out << ")";
 }
 
-}
+} // end namespace
 
+/**
+ * 存储计算结构信息类实现
+ */
 dacppTranslator::Calc::Calc() {
 }
 
 void dacppTranslator::Calc::setName(std::string name) {
     this->name = name;
 }
-
+    
 std::string dacppTranslator::Calc::getName() {
     return name;
 }
@@ -4611,20 +4738,22 @@ void dacppTranslator::Calc::setBody(Stmt* body) {
 std::string dacfor_func(const std::string& code, const std::string& name) {
    std::string result = code;
 
+    // 替换二维访问：name[i][j]
     std::regex pattern2D(R"(\b)" + name + R"(\s*\[\s*(\d+)\s*\]\s*\[\s*(\d+)\s*\])");
     std::string replacement2D = "virtual_to_physical(" + name + ", " + name + "_index+$1*info_" + name + "_acc[1]+$2, " + name + "_params)";
     result = std::regex_replace(result, pattern2D, replacement2D);
 
+    // 替换一维访问：name[i]
     std::regex pattern1D(R"(\b)" + name + R"(\s*\[\s*(\d+)\s*\])");
     std::string replacement1D = "virtual_to_physical(" + name + ", " + name + "_index+$1, " + name + "_params)";
     result = std::regex_replace(result, pattern1D, replacement1D);
-
+    // printf("result: %s\n", result.c_str());
     return result;
 }
 
 std::string func(std::string code, const std::string& name) {
     std::string result = code;
-
+    // 替换二维访问 name[i][j] -> name[i*info_name_acc[1]+j]
     std::regex pattern2D(R"(\b)" + name + R"(\s*\[\s*(\d+)\s*\]\s*\[\s*(\d+)\s*\])");
 
     std::string replacement2D = name + "[$1*info_" + name + "_acc[1]+$2]";
@@ -4664,11 +4793,13 @@ static std::string make_replacement_nd(
         return name + "[]";
     }
 
+    // 按“物理维度”标记：true 表示该维被降维算子固定
     std::vector<bool> fixed_dim(dim, false);
 
     for (size_t k = 0; k < temp.dimid.size(); ++k) {
         if (k >= temp.flag.size()) break;
 
+        // flag[k] == 1 表示第 k 个算子是降维算子
         if (temp.flag[k]) {
             int d = temp.dimid[k];
             if (d >= 0 && static_cast<size_t>(d) < dim) {
@@ -4677,8 +4808,10 @@ static std::string make_replacement_nd(
         }
     }
 
+    // 每个物理维最终对应的局部索引表达式
     std::vector<std::string> per_dim(dim, "0");
 
+    // 非固定维，按顺序吃掉 calc 里出现的下标
     size_t idx = 0;
     for (size_t d = 0; d < dim; ++d) {
         if (!fixed_dim[d]) {
@@ -4719,6 +4852,7 @@ static std::string funcnewN(
 
         char c = s[i];
 
+        // skip string
         if (c == '"') {
             ++i;
             while (i < n) {
@@ -4734,6 +4868,7 @@ static std::string funcnewN(
             continue;
         }
 
+        // skip char
         if (c == '\'') {
             ++i;
             while (i < n) {
@@ -4749,6 +4884,7 @@ static std::string funcnewN(
             continue;
         }
 
+        // skip //
         if (c == '/' && i + 1 < n && s[i+1] == '/') {
 
             i += 2;
@@ -4762,6 +4898,7 @@ static std::string funcnewN(
             continue;
         }
 
+        // skip /* */
         if (c == '/' && i + 1 < n && s[i+1] == '*') {
 
             i += 2;
@@ -4782,6 +4919,7 @@ static std::string funcnewN(
             continue;
         }
 
+        // identifier
         if (std::isalpha((unsigned char)c) || c == '_') {
 
             size_t j = i;
@@ -4916,19 +5054,20 @@ std::string funcnew3(const std::string code,const std::string &name, const dacpp
     out.reserve(s.size() * 2);
 
     size_t n = s.size();
-    size_t i = 0;
-    size_t last_appended = 0;
+    size_t i = 0;//扫描指针
+    size_t last_appended = 0;//写入指针
 
     while (i < n) {
         char c = s[i];
 
+        // skip strings and comments but still copy them to output
         if (c == '"') {
             ++i;
             while (i < n) {
                 if (s[i] == '"' && s[i-1] != '\\') { ++i; break; }
                 ++i;
             }
-
+            // copy everything from last_appended to i
             out.append(s, last_appended, i - last_appended);
             last_appended = i;
             continue;
@@ -4961,26 +5100,27 @@ std::string funcnew3(const std::string code,const std::string &name, const dacpp
             continue;
         }
 
+        // try match identifier name at position i
         if ((std::isalpha(static_cast<unsigned char>(c)) || c == '_')) {
             size_t j = i;
             while (j < n && is_ident_char(s[j])) ++j;
             size_t len = j - i;
             if (len == name.size() && s.compare(i, name.size(), name) == 0) {
-
+                // left boundary
                 if (i > 0 && is_ident_char(s[i-1])) {
-
+                    // it's part of a longer identifier, skip
                     ++i;
                     continue;
                 }
-
+                // find next non-space and check '['
                 size_t k = j;
                 while (k < n && std::isspace(static_cast<unsigned char>(s[k]))) ++k;
                 if (k < n && s[k] == '[') {
-
+                    // found name[  => parse bracket content
                     size_t p = k + 1;
                     int depth = 1;
                     while (p < n && depth > 0) {
-
+                        // handle nested strings/comments inside index
                         if (s[p] == '"') { ++p; while (p < n) { if (s[p] == '"' && s[p-1] != '\\') { ++p; break; } ++p; } continue; }
                         if (s[p] == '\'') { ++p; while (p < n) { if (s[p] == '\'' && s[p-1] != '\\') { ++p; break; } ++p; } continue; }
                         if (s[p] == '/' && p + 1 < n && s[p+1] == '/') { p += 2; while (p < n && s[p] != '\n') ++p; continue; }
@@ -4991,13 +5131,14 @@ std::string funcnew3(const std::string code,const std::string &name, const dacpp
                         ++p;
                     }
                     if (depth != 0) {
-
+                        // unmatched, treat as normal text
                         ++i;
                         continue;
                     }
                     size_t first_end = p - 1;
                     std::string inside1 = s.substr(k + 1, first_end - (k + 1));
 
+                    // now check for second [ ... ] immediately after (allow spaces)
                     size_t q = first_end + 1;
                     while (q < n && std::isspace(static_cast<unsigned char>(s[q]))) ++q;
                     bool has_second = false;
@@ -5023,12 +5164,14 @@ std::string funcnew3(const std::string code,const std::string &name, const dacpp
                         }
                     }
 
+                    // append everything up to 'name' (from last_appended)
                     out.append(s, last_appended, i - last_appended);
 
+                    // construct replacement
                     std::string replacement;
                     if (has_second) {
                         replacement = make_replacement_2d(name, inside1, inside2);
-
+                        // advance i to after second_end
                         i = second_end + 1;
                         last_appended = i;
                     } else {
@@ -5037,28 +5180,37 @@ std::string funcnew3(const std::string code,const std::string &name, const dacpp
                         last_appended = i;
                     }
 
+                    // append replacement
                     out.append(replacement);
 
+                    // continue scanning from current i
                     continue;
                 }
             }
-
+            // not matching name[...] -> append identifier as normal
+            // but we don't append immediately; let the normal copying logic handle it
         }
 
+        // 普通字符，直接跳过（我们暂不立即 append，最后把 tail 一并 append）
         ++i;
     }
 
+    // append remaining tail
     if (last_appended < n) out.append(s, last_appended, n - last_appended);
     return out;
 }
 
+
+
+
 std::string funcnew1(std::string code,const std::string& name){
    std::string result= code;
-   std::regex pattern1D(R"(\b)" + name + R"(\s*\[\s*([^\]]+)\s*\])");
-    std::string replacement1D = name + "[$1+" + name + "_0]";
-    result = std::regex_replace(result, pattern1D, replacement1D);
+   std::regex pattern1D(R"(\b)" + name + R"(\s*\[\s*([^\]]+)\s*\])"); 
+    std::string replacement1D = name + "[$1+" + name + "_0]"; 
+    result = std::regex_replace(result, pattern1D, replacement1D); 
     return result;
 }
+
 
 std::string dacppTranslator::Calc::getBody(int idx,std::vector<dacppTranslator::clacparam>& dim) {
   std::string code = body[idx];
@@ -5081,11 +5233,13 @@ std::string dacppTranslator::Calc::getBody(int idx,std::vector<dacppTranslator::
 std::string dacppTranslator::Calc::getBody(int idx) {
   std::string code = body[idx];
   for (int i = 0; i < getNumParams(); i++) {
-
+    
     std::string name = getParam(i)->getName();
-
+     //code = funcnew(code,name,dim0);
+    //std::regex pattern(name + R"((?![\w]|\[))");
+    //code = std::regex_replace(code, pattern, name + "[0]");
     code = func(code, name);
-
+    // printf("""code: %s\n", code.c_str());
   }
   return code;
 }
@@ -5093,7 +5247,13 @@ std::string dacppTranslator::Calc::dacfor_getBody(int idx) {
     std::string code = body[idx];
     for (int i = 0; i < getNumParams(); i++) {
       std::string name = getParam(i)->getName();
-
+      // printf("name: %s\n", name.c_str());
+      // if (getParam(i)->getType().find("Tensor") != -1 ||
+      //     getParam(i)->getType().find("Vector") != -1 || 
+      //     getParam(i)->getType().find("Matrix") != -1) {
+      //   continue;
+      // }
+      
       code = dacfor_func(code, name);
     }
     return code;
@@ -5140,23 +5300,30 @@ FunctionDecl* dacppTranslator::Calc::getCalcLoc() {
     return calcLoc;
 }
 
+// 解析Calc节点，将解析到的信息存储到Calc类中
 void dacppTranslator::Calc::parseCalc(const BinaryOperator* dacExpr) {
     Shell* shell = getFather()->getShell();
 
+    // 获取 DAC 数据关联表达式右值
     Expr* dacExprRHS = dacppTranslator::Expression::shellLHS_p (dacExpr) ? dacExpr->getRHS() : dacExpr->getLHS();
     FunctionDecl* calcFunc = dyn_cast<FunctionDecl>(dyn_cast<DeclRefExpr>(dacExprRHS)->getDecl());
-
+    
+    // 设置 AST 中 Calc 节点的位置
     setCalcLoc(calcFunc);
 
+    // 设置 Calc 函数名称
     setName(calcFunc->getNameAsString());
-
+  
+    // 设置 Calc 参数列表
     for(unsigned int paramsCount = 0; paramsCount < calcFunc->getNumParams(); paramsCount++) {
         Param* param = new Param();
 
+        // 获取参数读写属性
         param->setRw(inputOrOutput(calcFunc->getParamDecl(paramsCount)));
-
+        // 设置参数类型
         param->setType(calcFunc->getParamDecl(paramsCount)->getType());
-
+        
+        // 设置参数名称
         param->setName(calcFunc->getParamDecl(paramsCount)->getNameAsString());
 
         std::set<std::string> ruleSet;
@@ -5176,7 +5343,8 @@ void dacppTranslator::Calc::parseCalc(const BinaryOperator* dacExpr) {
             param->rule = "sycl::" + attr->getAnnotation().str() + "<>()";
           }
         }
-
+        
+        // 设置参数形状
         ShellParam* shellParam = shell->getShellParam(paramsCount);
 
         for (int i = 0; i < shellParam->getNumSplit(); i++) {
@@ -5187,7 +5355,7 @@ void dacppTranslator::Calc::parseCalc(const BinaryOperator* dacExpr) {
             } else if(sp->type.compare("IndexSplit") == 0) {
                 IndexSplit* isp = static_cast<IndexSplit*>(sp);
             } else {
-
+                // param->setShape(shellParam->getShape(i));
             }
         }
         if (param->getDim() == 0) {

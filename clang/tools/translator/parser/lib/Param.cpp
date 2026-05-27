@@ -12,6 +12,9 @@ using namespace llvm;
 
 using namespace llvm;
 
+/*
+    参数
+*/
 dacppTranslator::Param::Param() {
 }
 
@@ -23,6 +26,8 @@ dacppTranslator::IOTYPE dacppTranslator::Param::getRw() {
     return rw;
 }
 
+// When printing a reference, the referenced type might also be a reference.
+// If so, we want to skip that before printing the inner type.
 static clang::QualType skipTopLevelReferences(clang::QualType T) {
   if (auto *Ref = T->getAs<clang::ReferenceType>())
     return skipTopLevelReferences(Ref->getPointeeTypeAsWritten());
@@ -30,7 +35,7 @@ static clang::QualType skipTopLevelReferences(clang::QualType T) {
 }
 
 static clang::QualType GetBaseType(clang::QualType T) {
-
+  // FIXME: This should be on the Type class!
   clang::QualType BaseType = T;
   while (!BaseType->isSpecifierType()) {
     if (const clang::PointerType *PTy = BaseType->getAs<clang::PointerType>())
@@ -53,7 +58,7 @@ static clang::QualType GetBaseType(clang::QualType T) {
     else if (const clang::ParenType *PTy = BaseType->getAs<clang::ParenType>())
       BaseType = PTy->desugar();
     else
-
+      // This must be a syntax error.
       break;
   }
   return BaseType;
@@ -125,7 +130,7 @@ void dacppTranslator::Param::setType(clang::QualType newType) {
   found_p = true;
   Args = SpecTy->template_arguments();
   for (const auto &Arg : Args) {
-
+    // Print the argument into a string.
     llvm::SmallString<128> Buf;
     llvm::raw_svector_ostream ArgOS(Buf);
     const clang::TemplateArgument &Argument = (Arg);
@@ -180,6 +185,9 @@ int dacppTranslator::Param::getDimension() {
     return dimension;
 }
 
+/*
+    划分结构参数
+*/
 dacppTranslator::ShellParam::ShellParam() {
 }
 

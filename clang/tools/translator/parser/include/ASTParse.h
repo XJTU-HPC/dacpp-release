@@ -6,13 +6,14 @@
 
 #include "clang/AST/AST.h"
 
+
 #include "Param.h"
 
 using namespace clang;
 
 namespace dacppTranslator {
 
-// Depth-first search for the first matching child node.
+// 从结点中找到特定结点，深度优先搜索
 template <typename NodeType>
 NodeType* getNode(Stmt* curStmt) {
     if(!curStmt) return nullptr;
@@ -25,7 +26,7 @@ NodeType* getNode(Stmt* curStmt) {
     return nullptr;
 }
 
-// Breadth-first search variant used when shallow matches are preferred.
+// 从结点中找到特定结点，广度优先搜索
 template <typename NodeType>
 NodeType* getNodeBFS(Stmt* curStmt) {
     std::queue<Stmt*> q;
@@ -43,10 +44,14 @@ NodeType* getNodeBFS(Stmt* curStmt) {
     return nullptr;
 }
 
+
+
 void getSplitExpr(Expr* curExpr, std::string& name, std::vector<Expr*>& splits);
 
+// 将 clang 节点对应的代码转换成 std::string
 std::string stmt2String(Stmt *stmt);
 
+// 判断数据的输入输出属性
 IOTYPE inputOrOutput(const clang::ParmVarDecl* param);
 
 }

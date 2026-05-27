@@ -10,7 +10,7 @@
 
 namespace dacppTranslator {
 
-    // Semantic operations extracted from DAC-for control flow.
+    // 用于表示参数之间的语义操作，比如 swap(A, B)
     enum class SemanticOperation {
         None,
         Swap,
@@ -42,11 +42,11 @@ namespace dacppTranslator {
         SemanticOperation getOperation() const;
     };
 
-    // Captures the structural controls associated with a DAC-for region.
+    // 用于表示一个代码块中的结构性操作，例如多个 ParamControl 和循环信息
     class ControlBlock {
     private:
         std::vector<std::shared_ptr<ParamControl>> paramControls_;
-        std::string loopBound_;
+        std::string loopBound_; 
     public:
         ControlBlock(){
             loopBound_ = "ERROR";
@@ -59,6 +59,6 @@ namespace dacppTranslator {
         std::string getLoopBound() const;
     };
 
-}
+} // namespace dacppTranslator
 
-#endif
+#endif // TRANSLATOR_PARSER_CONTROL_H

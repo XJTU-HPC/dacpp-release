@@ -1,8 +1,9 @@
-
+//lsj优化后的Tensor 优化数据传输与初始化 通过大规模buffer模型测试
 #ifndef RECONTENSOR_H
 #define RECONTENSOR_H
 
 #include <algorithm>
+#include <any>
 #include <iostream>
 #include <vector>
 #include <exception>
@@ -12,18 +13,14 @@
 #include <cstring>
 #include <vector>
 #include <type_traits>
-#include <iomanip>
-#include <chrono>
-#include <fstream>
-#include <string>
-#include <iterator>
-#include <sstream>
-#include <type_traits>
+#include <iomanip> // 记得包含这个头文件
+#include <chrono>     // for std::chrono
 #pragma once
 
 #define READ       [[clang::annotate("read")]]
 #define WRITE      [[clang::annotate("write")]]
 #define READ_WRITE [[clang::annotate("read_write")]]
+
 
 namespace dacpp {
     template <typename Func>
@@ -32,14 +29,14 @@ namespace dacpp {
     }
     template <typename T1, typename U1>
     void swap(const T1&, const U1&) {
-        // Translator marker; intentionally a no-op at runtime.
+        // 什么都不做，避免真正执行
     }
-
+     
     template <class T, int N>
     class TensorProxy;
     template <class T>
     class TensorProxy <T, 1>;
-
+  
     template<class ImplType>
     class TensorBase{
     public:
@@ -91,7 +88,7 @@ namespace dacpp {
     int TensorBase<ImplType> :: getOffset() const {return this->offset_;}
     template <class ImplType>
     int TensorBase<ImplType> :: getDim() const {return this->dim_;}
-
+ 
     template<class ImplType>
     int TensorBase<ImplType> :: getSize() const {
         int size = 1;
@@ -101,7 +98,7 @@ namespace dacpp {
         return size;
     }
     template<class ImplType>
-    void TensorBase<ImplType> :: tensor2Array(ImplType* &data) const {
+    void TensorBase<ImplType> :: tensor2Array(ImplType* &data) const { 
         const int total_size = getSize();
         const ImplType* src = this->data_.get();
         const int offset = this->offset_;
@@ -109,6 +106,7 @@ namespace dacpp {
         const int* shape  = this->shape_.get();
         const int dim = this->dim_;
 
+        // 判断是否连续存储
         bool is_contiguous = true;
         int expected_stride = 1;
         for (int i = dim - 1; i >= 0; --i) {
@@ -119,12 +117,14 @@ namespace dacpp {
             expected_stride *= shape[i];
         }
 
+        // 连续存储：直接 memcpy
         if (is_contiguous) {
-
-            data=getDataPtr().get();
+            // std::memcpy(data, src + offset, sizeof(ImplType) * total_size);
+            data = getDataPtr().get() + offset;
             return;
         }
 
+        // 非连续存储：线性访问转换
         std::vector<int> idx(dim, 0);
         for (int linear = 0; linear < total_size; ++linear) {
             int real_index = offset;
@@ -133,6 +133,7 @@ namespace dacpp {
             }
             data[linear] = src[real_index];
 
+        // 增加多维坐标
             for (int d = dim - 1; d >= 0; --d) {
                 idx[d]++;
                 if (idx[d] < shape[d]) break;
@@ -143,15 +144,16 @@ namespace dacpp {
     template<class ImplType>
     void TensorBase<ImplType>::tensor2Array(std::vector<ImplType>& data) const {
     const int total_size = getSize();
-    data.resize(total_size);
+    data.resize(total_size); // 调整输出 vector 大小
 
-    ImplType* dst = data.data();
-    const ImplType* src = this->data_.get();
+    ImplType* dst = data.data();                // 输出指针
+    const ImplType* src = this->data_.get();    // 源指针
     const int offset = this->offset_;
     const int* stride = this->stride_.get();
     const int* shape  = this->shape_.get();
     const int dim = this->dim_;
 
+    // 判断是否连续存储
     bool is_contiguous = true;
     int expected_stride = 1;
     for (int i = dim - 1; i >= 0; --i) {
@@ -162,10 +164,11 @@ namespace dacpp {
         expected_stride *= shape[i];
     }
 
+    // 连续存储：直接 memcpy
     if (is_contiguous) {
         std::memcpy(dst, src + offset, sizeof(ImplType) * total_size);
     } else {
-
+        // 非连续存储：线性访问转换
         std::vector<int> idx(dim, 0);
         for (int linear = 0; linear < total_size; ++linear) {
             int real_index = offset;
@@ -174,6 +177,7 @@ namespace dacpp {
             }
             dst[linear] = src[real_index];
 
+            // 多维索引递增
             for (int d = dim - 1; d >= 0; --d) {
                 idx[d]++;
                 if (idx[d] < shape[d]) break;
@@ -191,6 +195,7 @@ namespace dacpp {
     const int* shape  = this->shape_.get();
     const int dim = this->dim_;
 
+    // 判断是否连续存储
     bool is_contiguous = true;
     int expected_stride = 1;
     for (int i = dim - 1; i >= 0; --i) {
@@ -201,11 +206,13 @@ namespace dacpp {
         expected_stride *= shape[i];
     }
 
+    // 连续存储：直接 memcpy
     if (is_contiguous) {
         std::memcpy(dst + offset, data, sizeof(ImplType) * total_size);
         return;
     }
-
+ 
+    // 非连续存储：线性访问转换
     std::vector<int> idx(dim, 0);
     for (int linear = 0; linear < total_size; ++linear) {
         int real_index = offset;
@@ -214,6 +221,7 @@ namespace dacpp {
         }
         dst[real_index] = data[linear];
 
+        // 增加多维坐标
         for (int d = dim - 1; d >= 0; --d) {
             idx[d]++;
             if (idx[d] < shape[d]) break;
@@ -225,12 +233,13 @@ namespace dacpp {
     void TensorBase<ImplType>::array2Tensor(std::vector<ImplType> data) {
 
     const int total_size = getSize();
-    ImplType* dst = this->data_.get();
+    ImplType* dst = this->data_.get();   // Tensor 内存指针
     const int offset = this->offset_;
     const int* stride = this->stride_.get();
     const int* shape  = this->shape_.get();
     const int dim = this->dim_;
 
+    // 判断是否连续存储
     bool is_contiguous = true;
     int expected_stride = 1;
     for (int i = dim - 1; i >= 0; --i) {
@@ -241,10 +250,11 @@ namespace dacpp {
         expected_stride *= shape[i];
     }
 
+    // 连续存储：直接 memcpy
     if (is_contiguous) {
         std::memcpy(dst + offset, data.data(), sizeof(ImplType) * total_size);
     } else {
-
+        // 非连续存储：线性访问转换
         std::vector<int> idx(dim, 0);
         for (int linear = 0; linear < total_size; ++linear) {
             int real_index = offset;
@@ -253,6 +263,7 @@ namespace dacpp {
             }
             dst[real_index] = data[linear];
 
+            // 多维索引递增
             for (int d = dim - 1; d >= 0; --d) {
                 idx[d]++;
                 if (idx[d] < shape[d]) break;
@@ -280,7 +291,7 @@ namespace dacpp {
         static std::vector<int> indices;
         if(dimIdx == this->dim_) {
             int index = this->offset_;
-            for(int i = 0; i < this->dim_; i++)
+            for(int i = 0; i < this->dim_; i++) 
                 index += indices[i] * this->stride_.get()[i];
             data[idx++] = this->data_.get()[index];
             return;
@@ -290,13 +301,13 @@ namespace dacpp {
             recursiveTake(data, idx, dimIdx + 1);
             indices.pop_back();
         }
-    }
+    } 
     template<class ImplType>
     void TensorBase<ImplType> :: recursiveTake(std::vector <ImplType>& data, int &idx, int dimIdx) const {
         static std::vector<int> indices;
         if(dimIdx == this->dim_) {
             int index = this->offset_;
-            for(int i = 0; i < this->dim_; i++)
+            for(int i = 0; i < this->dim_; i++) 
                 index += indices[i] * this->stride_.get()[i];
             data[idx++]=this->data_.get()[index];
             return;
@@ -312,7 +323,7 @@ namespace dacpp {
         static std::vector<int> indices;
         if(dimIdx == this->dim_) {
             int index = this->offset_;
-            for(int i = 0; i < this->dim_; i++)
+            for(int i = 0; i < this->dim_; i++) 
                 index += indices[i] * this->stride_.get()[i];
             this->data_.get()[index] = data[idx++];
             return;
@@ -328,9 +339,9 @@ namespace dacpp {
         static std::vector<int> indices;
         if(dimIdx == this->dim_) {
             int index = this->offset_;
-            for(int i = 0; i < this->dim_; i++)
+            for(int i = 0; i < this->dim_; i++) 
                 index += indices[i] * this->stride_.get()[i];
-
+            //std::cout<<index<<" "<<this->data_.get()[index]<<" "<<data[idx]<<std::endl;
             this->data_.get()[index] = data[idx++];
             return;
         }
@@ -345,16 +356,16 @@ namespace dacpp {
         static std::vector<int> indices;
         if(dimIdx == this->dim_) {
             int index = this->offset_;
-            for(int i = 0; i < this->dim_; i++)
+            for(int i = 0; i < this->dim_; i++) 
                 index += indices[i] * this->stride_.get()[i];
             std::cout << this->data_.get()[index];
             return;
         }
-        std::cout << "{";
+        std::cout << "{";  
         for(int i = 0; i < this->shape_.get()[dimIdx]; i++) {
             indices.push_back(i);
             recursivePrint(dimIdx + 1);
-            if(i != this->shape_.get()[dimIdx] - 1)
+            if(i != this->shape_.get()[dimIdx] - 1) 
                 std::cout << ", ";
             indices.pop_back();
         }
@@ -382,7 +393,7 @@ namespace dacpp {
         friend class dacpp::TensorProxy<ImplType, N>;
         friend class dacpp::TensorProxy<ImplType, 1>;
     public:
-
+    /***************************************************************** */
         void takeOwnership(int*& ptr) {
             this->data_.reset(ptr);
             ptr = nullptr;
@@ -390,10 +401,9 @@ namespace dacpp {
 
         void takeOwnership( std::vector<ImplType>& vec) {
             this->tmp_data = std::move(vec);
-            // Keep shared_ptr bound to moved vector storage.
-            this->data_.reset(this->tmp_data.data(), [](ImplType*){  });
+            this->data_.reset(this->tmp_data.data(), [](ImplType*){ /* 不删除数据 */ });
         }
-
+    /************************************************************************************ */
         Tensor(){
             this->dim_ = N;
             this->shape_.reset(new int[N]);
@@ -407,11 +417,11 @@ namespace dacpp {
         Tensor(const std::vector<int> values, ImplType data = 0);
         Tensor(std::shared_ptr<ImplType> data, int offset, int dim, std::shared_ptr<int> shape, std::shared_ptr<int> stride);
         Tensor(std::shared_ptr<ImplType> data, int offset, int dim, std::shared_ptr<int> shape, std::shared_ptr<int> stride, int currentdim);
-        Tensor<ImplType, N>& operator=(const Tensor<ImplType, N>& operand);
+        Tensor<ImplType, N>& operator=(const Tensor<ImplType, N>& operand); 
         Tensor<ImplType, N>& operator=(const TensorProxy<ImplType, N>& operand){
             std::vector<ImplType> data;
             operand.tensor2Array(data);
-            this->data_.reset(new ImplType[data.size()]);
+            this->data_.reset(new ImplType[data.size()]);   
             this->dim_ = operand.getDim();
             this->offset_ = 0;
             this->current_dim = 0;
@@ -469,7 +479,7 @@ namespace dacpp {
     Tensor<ImplType, N> :: Tensor(const TensorProxy<ImplType, N> &x){
         std::vector<ImplType> data;
         x.tensor2Array(data);
-        this->data_.reset(new ImplType[data.size()]);
+        this->data_.reset(new ImplType[data.size()]);   
         this->dim_ = x.getDim();
         this->offset_ = 0;
         this->current_dim = 0;
@@ -489,7 +499,7 @@ namespace dacpp {
     Tensor<ImplType, N> :: Tensor(const Tensor<ImplType, N> &x){
         std::vector<ImplType> data;
         x.tensor2Array(data);
-        this->data_.reset(new ImplType[data.size()]);
+        this->data_.reset(new ImplType[data.size()]);   
         this->dim_ = x.getDim();
         this->offset_ = 0;
         this->current_dim = 0;
@@ -511,7 +521,7 @@ namespace dacpp {
         for(auto value : values)    ElementSize *= value;
         this->data_ = std::shared_ptr<ImplType>
             (new ImplType[ElementSize], std::default_delete<ImplType[]>());
-
+        // std::cout<<"新版本已调用1"<<std::endl;
         takeOwnership(data);
         this->offset_ = 0;
         this->dim_ = values.size();
@@ -521,9 +531,9 @@ namespace dacpp {
         it--;
         for(int idx = this->dim_ - 1; idx >= 0; idx--) {
             this->shape_.get()[idx] = *it;
-            if(idx == this->dim_ - 1)
+            if(idx == this->dim_ - 1) 
                 this->stride_.get()[idx] = 1;
-            else
+            else 
                 this->stride_.get()[idx] = this->stride_.get()[idx + 1] * this->shape_.get()[idx + 1];
             it--;
         }
@@ -532,9 +542,13 @@ namespace dacpp {
     Tensor<ImplType, N> :: Tensor(const std::vector<int> values, std::vector<ImplType>& data){
         int ElementSize = 1;
         for(auto value : values)    ElementSize *= value;
-        if(ElementSize != data.size())
+        if(ElementSize != data.size())  
             throw std::runtime_error("The number of elements in the vector does not correspond to the Shape.");
-
+        // this->data_ = std::shared_ptr<ImplType>
+        //     (new ImplType[data.size()], std::default_delete<ImplType[]>());
+        // for(size_t i = 0; i < data.size(); i++)
+        //     this->data_.get()[i] = data[i];
+        // std::cout<<"新版本已调用2"<<std::endl;
         takeOwnership( data);
         this->offset_ = 0;
         this->dim_ = values.size();
@@ -544,9 +558,9 @@ namespace dacpp {
         it--;
         for(int idx = this->dim_ - 1; idx >= 0; idx--) {
             this->shape_.get()[idx] = *it;
-            if(idx == this->dim_ - 1)
+            if(idx == this->dim_ - 1) 
                 this->stride_.get()[idx] = 1;
-            else
+            else 
                 this->stride_.get()[idx] = this->stride_.get()[idx + 1] * this->shape_.get()[idx + 1];
             it--;
         }
@@ -567,9 +581,9 @@ namespace dacpp {
         it--;
         for(int idx = this->dim_ - 1; idx >= 0; idx--) {
             this->shape_.get()[idx] = *it;
-            if(idx == this->dim_ - 1)
+            if(idx == this->dim_ - 1) 
                 this->stride_.get()[idx] = 1;
-            else
+            else 
                 this->stride_.get()[idx] = this->stride_.get()[idx + 1] * this->shape_.get()[idx + 1];
             it--;
         }
@@ -595,7 +609,7 @@ namespace dacpp {
     Tensor<ImplType, N>& Tensor<ImplType, N> :: operator=(const Tensor<ImplType, N>& operand) {
         std::vector<ImplType> data;
         operand.tensor2Array(data);
-        this->data_.reset(new ImplType[data.size()]);
+        this->data_.reset(new ImplType[data.size()]);   
         this->offset_ = 0;
         this->current_dim = 0;
         for(int i = this->dim_ - 1; i >=0; i--){
@@ -624,7 +638,7 @@ namespace dacpp {
             i++;
             end = *i;
             i++;
-            if(i!=idx.end())
+            if(i!=idx.end())    
                 stride = *i;
             return TensorProxy<ImplType, N>(*this, this->current_dim, start, end, stride, 1);
         }
@@ -643,8 +657,8 @@ namespace dacpp {
     }
     template<class ImplType, int N>
     Tensor<ImplType, N-1> Tensor<ImplType, N> :: slice(int dimIdx, int idx) const {
-
-        if(dimIdx >= this->dim_ || idx >= this->shape_.get()[dimIdx])
+        // 参数检查
+        if(dimIdx >= this->dim_ || idx >= this->shape_.get()[dimIdx]) 
             throw std::runtime_error("[int] operates on dimensions that exceed those of Tensor.");
         int offset = this->offset_ + idx * this->stride_.get()[dimIdx];
         int dim = this->dim_ - 1;
@@ -664,9 +678,9 @@ namespace dacpp {
     }
     template<class ImplType, int N>
     Tensor<ImplType, N> Tensor<ImplType, N> :: slice(int dimIdx, int start, int end, int sliceStride, int ModifyDim) const {
-
+        // 参数检查
         if(dimIdx >= this->dim_ || start >= this->shape_.get()[dimIdx] || end > this->shape_.get()[dimIdx]
-        || start < 0 || end < 0 || start > end)
+        || start < 0 || end < 0 || start > end) 
             throw std::runtime_error("[{}] operates on dimensions that exceed those of Tensor.");
         int offset = this->offset_ + start * this->stride_.get()[dimIdx];
         int dim = this->dim_;
@@ -708,12 +722,12 @@ namespace dacpp {
         Tensor(int len, const ImplType *init);
         Tensor(std::shared_ptr<ImplType> data, int offset, int dim, std::shared_ptr<int> shape, std::shared_ptr<int> stride);
         Tensor(std::shared_ptr<ImplType> data, int offset, int dim, std::shared_ptr<int> shape, std::shared_ptr<int> stride, int currentdim);
-
+        
         Tensor& operator=(const Tensor<ImplType, 1>& operand);
         Tensor& operator=(const TensorProxy<ImplType, 1>& operand){
             std::vector<ImplType> data;
             operand.tensor2Array(data);
-            this->data_.reset(new ImplType[data.size()]);
+            this->data_.reset(new ImplType[data.size()]);   
             this->dim_ = 1;
             this->offset_ = 0;
             this->current_dim = 0;
@@ -777,7 +791,7 @@ namespace dacpp {
     Base :: Tensor(const TensorProxy<ImplType, 1> &x){
         std::vector<ImplType> data;
         x.tensor2Array(data);
-        this->data_.reset(new ImplType[data.size()]);
+        this->data_.reset(new ImplType[data.size()]);   
         this->dim_ = x.getDim();
         this->offset_ = 0;
         this->current_dim = 0;
@@ -797,7 +811,7 @@ namespace dacpp {
     Base :: Tensor(const Tensor<ImplType, 1> &x){
         std::vector<ImplType> data;
         x.tensor2Array(data);
-        this->data_.reset(new ImplType[data.size()]);
+        this->data_.reset(new ImplType[data.size()]);   
         this->dim_ = x.getDim();
         this->offset_ = 0;
         this->current_dim = 0;
@@ -852,7 +866,7 @@ namespace dacpp {
     Tensor<ImplType, 1>& Base :: operator=(const Tensor<ImplType, 1>& operand) {
         std::vector<ImplType> data;
         operand.tensor2Array(data);
-        this->data_.reset(new ImplType[data.size()]);
+        this->data_.reset(new ImplType[data.size()]);   
         this->offset_ = 0;
         this->current_dim = 0;
         for(int i = 0; i < this->dim_; i++){
@@ -877,7 +891,7 @@ namespace dacpp {
             i++;
             end = *i;
             i++;
-            if(i!=idx.end())
+            if(i!=idx.end())    
                 stride = *i;
             return TensorProxy<ImplType, 1>(*this, this->current_dim, start, end, stride, 1);
         }
@@ -890,18 +904,18 @@ namespace dacpp {
     ImplType& Base :: operator[](index sp) const{return slice(this->current_dim, 0);}
     template<class ImplType>
     ImplType& Base :: slice(int dimIdx, int idx) const {
-        if(dimIdx >= this->dim_ || idx >= this->shape_.get()[dimIdx])
+        if(dimIdx >= this->dim_ || idx >= this->shape_.get()[dimIdx]) 
             throw std::runtime_error("[int] operates on dimensions that exceed those of Tensor.");
         int offset = this->offset_ + idx * this->stride_.get()[dimIdx];
         return this->data_.get()[offset];
     }
     template<class ImplType>
     Tensor<ImplType, 1> Base :: slice(int dimIdx, int start, int end, int sliceStride, int ModifyDim) const {
-
+        // 参数检查
         if(dimIdx >= this->dim_ || start >= this->shape_.get()[dimIdx] || end > this->shape_.get()[dimIdx]
-        || start < 0 || end < 0 || start > end)
+        || start < 0 || end < 0 || start > end) 
             throw std::runtime_error("[{}] operates on dimensions that exceed those of Tensor.");
-        int offset = start * this->stride_.get()[dimIdx];
+        int offset = this->offset_ + start * this->stride_.get()[dimIdx];
         int dim = this->dim_;
         std::shared_ptr<int> shape(new int[dim], std::default_delete<int[]>());
         std::shared_ptr<int> stride(new int[dim], std::default_delete<int[]>());
@@ -939,7 +953,7 @@ namespace dacpp {
         TensorProxy(const TensorProxy& x){
             std::vector<ImplType> data;
             x.tensor2Array(data);
-            this->data_.reset(new ImplType[data.size()]);
+            this->data_.reset(new ImplType[data.size()]);   
             this->dim_ = x.getDim();
             this->offset_ = 0;
             this->current_dim = 0;
@@ -960,7 +974,7 @@ namespace dacpp {
             tmp.offset_ = 0;
             std::vector<ImplType> dtmp;
             this->tensor2Array(dtmp);
-            tmp.data_.reset(new ImplType[dtmp.size()]);
+            tmp.data_.reset(new ImplType[dtmp.size()]); 
             for(int i = tmp.dim_ - 1; i >=0; i--){
                 tmp.shape_.get()[i] = this->getShape(i);
                 if(i == tmp.dim_ - 1)
@@ -1021,9 +1035,9 @@ namespace dacpp {
     Base :: TensorProxy(const dacpp::Tensor<ImplType, N> &tensor, int dimIdx, int start, int end, int sliceStride, int ModifyDim){
 
         if(dimIdx >= tensor.getDim() || start >= tensor.getShape(dimIdx) || end > tensor.getShape(dimIdx)
-        || start < 0 || end < 0 || start > end)
+        || start < 0 || end < 0 || start > end) 
             throw std::runtime_error("[{}] operates on dimensions that exceed those of TensorProxy.");
-        int offset = start * tensor.getStride(dimIdx);
+        int offset = tensor.getOffset() + start * tensor.getStride(dimIdx);
         int dim = tensor.getDim();
         std::shared_ptr<int> shape(new int[dim], std::default_delete<int[]>());
         std::shared_ptr<int> stride(new int[dim], std::default_delete<int[]>());
@@ -1063,7 +1077,7 @@ namespace dacpp {
             i++;
             end = *i;
             i++;
-            if(i!=idx.end())
+            if(i!=idx.end())    
                 stride = *i;
             return Pslice(this->current_dim, start, end, stride, 1);
         }
@@ -1082,7 +1096,7 @@ namespace dacpp {
     }
     template<class ImplType, int N>
     TensorProxy<ImplType, N-1> Base :: Pslice(int dimIdx, int idx) const {
-        if(dimIdx >= this->dim_ || idx >= this->shape_.get()[dimIdx])
+        if(dimIdx >= this->dim_ || idx >= this->shape_.get()[dimIdx]) 
             throw std::runtime_error("[int] operates on dimensions that exceed those of TensorProxy.");
         int offset = this->offset_ + idx * this->stride_.get()[dimIdx];
         int dim = this->dim_ - 1;
@@ -1103,7 +1117,7 @@ namespace dacpp {
     template<class ImplType, int N>
     TensorProxy<ImplType, N> Base :: Pslice(int dimIdx, int start, int end, int sliceStride, int ModifyDim) const {
         if(dimIdx >= this->dim_ || start >= this->shape_.get()[dimIdx] || end > this->shape_.get()[dimIdx]
-        || start < 0 || end < 0 || start > end)
+        || start < 0 || end < 0 || start > end) 
             throw std::runtime_error("[{}] operates on dimensions that exceed those of TensorProxy.");
         int offset = this->offset_ + start * this->stride_.get()[dimIdx];
         int dim = this->dim_;
@@ -1176,7 +1190,7 @@ namespace dacpp {
         TensorProxy(const TensorProxy& x){
             std::vector<ImplType> data;
             x.tensor2Array(data);
-            this->data_.reset(new ImplType[data.size()]);
+            this->data_.reset(new ImplType[data.size()]);   
             this->dim_ = x.getDim();
             this->offset_ = 0;
             this->current_dim = 0;
@@ -1197,7 +1211,7 @@ namespace dacpp {
             tmp.offset_ = 0;
             std::vector<ImplType> dtmp;
             this->tensor2Array(dtmp);
-            tmp.data_.reset(new ImplType[dtmp.size()]);
+            tmp.data_.reset(new ImplType[dtmp.size()]); 
             for(int i = tmp.dim_ - 1; i >=0; i--){
                 tmp.shape_.get()[i] = this->getShape(i);
                 if(i == tmp.dim_ - 1)
@@ -1257,7 +1271,7 @@ namespace dacpp {
     template<class ImplType>
     Base :: TensorProxy(const dacpp::Tensor<ImplType, 1> &tensor, int dimIdx, int start, int end, int sliceStride, int ModifyDim){
         if(dimIdx >= tensor.getDim() || start >= tensor.getShape(dimIdx) || end > tensor.getShape(dimIdx)
-        || start < 0 || end < 0 || start > end)
+        || start < 0 || end < 0 || start > end) 
             throw std::runtime_error("[{}] operates on dimensions that exceed those of TensorProxy.");
         int offset = start * tensor.getStride(dimIdx);
         int dim = tensor.getDim();
@@ -1299,7 +1313,7 @@ namespace dacpp {
             i++;
             end = *i;
             i++;
-            if(i!=idx.end())
+            if(i!=idx.end())    
                 stride = *i;
             return Pslice(this->current_dim, start, end, stride, 1);
         }
@@ -1318,7 +1332,7 @@ namespace dacpp {
     }
     template<class ImplType>
     ImplType& Base ::Pslice(int dimIdx, int idx) const {
-        if(dimIdx >= this->dim_ || idx >= this->shape_.get()[dimIdx])
+        if(dimIdx >= this->dim_ || idx >= this->shape_.get()[dimIdx]) 
             throw("Slice operates on dimensions that exceed those of TensorProxy.");
         int offset = this->offset_ + idx * this->stride_.get()[dimIdx];
         return this->data_.get()[offset];
@@ -1326,7 +1340,7 @@ namespace dacpp {
     template<class ImplType>
     TensorProxy<ImplType, 1> Base :: Pslice(int dimIdx, int start, int end, int sliceStride, int ModifyDim) const {
         if(dimIdx >= this->dim_ || start >= this->shape_.get()[dimIdx] || end > this->shape_.get()[dimIdx]
-        || start < 0 || end < 0 || start > end)
+        || start < 0 || end < 0 || start > end) 
             throw("Slice operates on dimensions that exceed those of TensorProxy.");
         int offset = this->offset_ + start * this->stride_.get()[dimIdx];
         int dim = this->dim_;
@@ -1375,7 +1389,7 @@ namespace dacpp {
     }
     #undef Base
 
-}
+} // namespace dacpp
 
 namespace dacpp {
     template <class T>
@@ -1384,100 +1398,4 @@ namespace dacpp {
     using Matrix = Tensor<T, 2>;
 }
 
-namespace dacpp {
-
-    template<typename T>
-    std::vector<T> read_file(const std::string& filename) {
-        std::ifstream file(filename);
-        if (!file.is_open()) throw std::runtime_error("File not found: " + filename);
-        return std::vector<T>(std::istream_iterator<T>(file), std::istream_iterator<T>());
-    }
-
-    template<typename T>
-    std::vector<T> read_file_dsv(const std::string& filename, char delimiter = ',') {
-        std::ifstream file(filename);
-        if (!file.is_open()) throw std::runtime_error("File not found: " + filename);
-
-        std::vector<T> data;
-        std::string line;
-        while (std::getline(file, line)) {
-            if (line.empty()) continue;
-            std::stringstream ss(line);
-            std::string cell;
-            while (std::getline(ss, cell, delimiter)) {
-
-                std::stringstream converter(cell);
-                T value;
-                if (converter >> value) {
-                    data.push_back(value);
-                }
-            }
-        }
-        return data;
-    }
-}
-
-namespace dacpp {
-
-    template<typename T>
-    struct MatrixObject {
-        std::vector<int> shape;
-        std::vector<T> data;
-    };
-
-    template<typename T>
-    MatrixObject<T> read_matrix_mtx_row(const std::string& filename) {
-        std::ifstream file(filename);
-        if (!file.is_open()) throw std::runtime_error("File not found");
-
-        std::string line;
-
-        while (std::getline(file, line)) {
-            if (line[0] != '%') break;
-        }
-
-        std::stringstream ss(line);
-        int rows, cols;
-        ss >> rows >> cols;
-
-        std::vector<T> data;
-        data.reserve(rows * cols);
-        T val;
-        while (file >> val) data.push_back(val);
-
-        return {{rows, cols}, data};
-    }
-
-    template<typename T>
-    MatrixObject<T> read_matrix_mtx_col(const std::string& filename) {
-        std::ifstream file(filename);
-        if (!file.is_open()) throw std::runtime_error("File not found: " + filename);
-
-        std::string line;
-
-        while (std::getline(file, line)) {
-            if (line.empty()) continue;
-            if (line[0] != '%') break;
-        }
-
-        std::stringstream ss(line);
-        int rows, cols;
-        if (!(ss >> rows >> cols)) throw std::runtime_error("Invalid MTX header");
-
-        // Convert column-major MTX input into row-major tensor storage.
-        std::vector<T> data(rows * cols);
-
-        for (int j = 0; j < cols; ++j) {
-            for (int i = 0; i < rows; ++i) {
-                T val;
-                if (file >> val) {
-
-                    data[i * cols + j] = val;
-                }
-            }
-        }
-
-        return {{rows, cols}, data};
-    }
-}
 #endif

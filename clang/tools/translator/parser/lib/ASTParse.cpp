@@ -9,6 +9,7 @@
 
 using namespace clang;
 
+// 将clang节点对应的代码转换成std::string
 std::string dacppTranslator::stmt2String(Stmt *stmt) {
     clang::LangOptions lo;
     std::string out_str;
@@ -17,11 +18,14 @@ std::string dacppTranslator::stmt2String(Stmt *stmt) {
     return out_str;
 }
 
+
+
+// 获得划分信息，将划分相关的变量名和节点保存到name和splits中
 void dacppTranslator::getSplitExpr(Expr* curExpr, std::string& name, std::vector<Expr*>& splits) {
     if(!curExpr) { return; }
     CXXOperatorCallExpr* splitExpr = nullptr;
     if(!isa<CXXOperatorCallExpr>(curExpr)) {
-        splitExpr = dacppTranslator::getNode<CXXOperatorCallExpr>(curExpr);
+        splitExpr = dacppTranslator::getNode<CXXOperatorCallExpr>(curExpr); 
     }
     else {
         splitExpr = dyn_cast<CXXOperatorCallExpr>(curExpr);
@@ -39,8 +43,23 @@ void dacppTranslator::getSplitExpr(Expr* curExpr, std::string& name, std::vector
     }
 }
 
+
+//判断数据的输入输出属性
+// dacppTranslator::IOTYPE
+// dacppTranslator::inputOrOutput(std::string dataType) {
+//     if (dataType.find("volatile") != std::string::npos) {
+//         return IOTYPE::READ_WRITE;
+//     }
+//     else if (dataType.find("const") != std::string::npos) {
+//         return IOTYPE::READ;
+//     }
+//     else {
+//         return IOTYPE::WRITE;
+//     }
+// }
 dacppTranslator::IOTYPE
 dacppTranslator::inputOrOutput(const clang::ParmVarDecl* param) {
+
 
     for (const auto* attr : param->attrs()) {
         if (const auto* ann = llvm::dyn_cast<clang::AnnotateAttr>(attr)) {

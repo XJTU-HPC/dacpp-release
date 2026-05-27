@@ -2,6 +2,9 @@
 
 #include "Split.h"
 
+/*
+    划分父类
+*/
 dacppTranslator::Split::Split(Split *parent) {
     this->parent = parent;
 }
@@ -36,6 +39,9 @@ int dacppTranslator::Split::getSplitNumber() {
     return splitNumber;
 }
 
+/*
+    降维划分
+*/
 dacppTranslator::IndexSplit::IndexSplit(Split *parent): Split(parent) {
 }
 
@@ -51,6 +57,9 @@ int dacppTranslator::IndexSplit::getSplitNumber() {
     return splitNumber;
 }
 
+/*
+    规则分区划分
+*/
 dacppTranslator::RegularSplit::RegularSplit(Split *parent): Split(parent) {
 }
 

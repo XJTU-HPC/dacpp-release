@@ -8,12 +8,16 @@
 
 namespace dacpp {
 
+
+// 降维算子
 class index {
 public:
     const index operator+(const int &R)const;
     const index operator-(const int &R)const;
 };
 
+
+// 分区算子
 class split {
 private:
     int size_;
@@ -23,9 +27,12 @@ public:
     split(int size, int stride) : size_(size), stride_(stride) {}
     const split operator+(const int &R)const;
     const split operator-(const int &R)const;
-};
+}; 
 
+
+// 保形算子
 class conformal {};
+
 
 struct Slice {
     bool isindex_;
@@ -40,11 +47,13 @@ struct Slice {
     Slice(index i) : isindex_(true) {}
 };
 
+
 void binding (index, index);
 void binding (index, split);
 void binding (split, index);
 void binding (split, split);
 
-}
+
+} // namespace dacpp
 
 #endif

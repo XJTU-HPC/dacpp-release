@@ -2,6 +2,8 @@
 
 namespace dacppTranslator {
 
+// ==== Dacfor 实现 ====
+
 ParamControl::ParamControl()
     : paramA_(nullptr), paramB_(nullptr), operation_(SemanticOperation::None) {}
 
@@ -25,9 +27,13 @@ Param* ParamControl::getParamB(){
     return paramB_;
 }
 
+
 SemanticOperation ParamControl::getOperation() const {
     return operation_;
 }
+
+// ==== ControlBlock 实现 ====
+
 
 void ControlBlock::addParamControl(const std::shared_ptr<ParamControl>& control) {
     paramControls_.push_back(control);
@@ -45,4 +51,4 @@ std::string ControlBlock::getLoopBound() const {
     return loopBound_;
 }
 
-}
+} // namespace dacppTranslator

@@ -15,6 +15,7 @@ T reduction_max(Expr, Var, const T&, std::size_t) {
     return T{};
 }
 
-}
 
-#endif
+} // namespace dac_reduction
+
+#endif // DAC_REDUCTION_HPP

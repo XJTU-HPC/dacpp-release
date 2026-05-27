@@ -8,11 +8,14 @@ typedef struct VNode VNode;
 
 namespace dacppTranslator {
 
+/*
+    划分父类
+*/
 class Split {
 
 private:
-    std::string id;
-    int dimIdx;
+    std::string id; // 划分标识
+    int dimIdx; // 划分作用维度
     int splitNumber;
 
 public:
@@ -35,10 +38,13 @@ public:
 
 };
 
+/*
+    降维划分
+*/
 class IndexSplit : public Split {
 
 private:
-    int splitNumber;
+    int splitNumber; // 划分总份数
 
 public:
     IndexSplit(Split *parent);
@@ -48,18 +54,20 @@ public:
     int getSplitNumber();
 
     std::string toString(){
-        return "id: " + getId() + "\n" +
+        return "id: " + getId() + "\n" +  // 使用父类的 getter
                "dimIdx: " + std::to_string(getDimIdx()) + "\n" +
                "splitNumber: " + std::to_string(splitNumber) + "\n";
     }
 };
-
+/*
+    规则分区划分
+*/
 class RegularSplit : public Split {
 
 private:
-    int splitSize;
-    int splitStride;
-    int splitNumber;
+    int splitSize; // 划分大小
+    int splitStride; // 划分步长
+    int splitNumber; // 划分总份数
 
 public:
     RegularSplit(Split *parent);
@@ -75,7 +83,7 @@ public:
     int getSplitNumber();
 
     std::string toString(){
-        return "id: " + getId() + "\n" +
+        return "id: " + getId() + "\n" +  // 使用父类的 getter
                "dimIdx: " + std::to_string(getDimIdx()) + "\n" +
                "splitSize: " + std::to_string(splitSize) + "\n" +
                "splitStride: " + std::to_string(splitStride) + "\n" +

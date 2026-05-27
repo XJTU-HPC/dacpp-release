@@ -1,0 +1,698 @@
+#include <algorithm>
+#include <cctype>
+
+#include "DacppStructure.h"
+#include "Rewriter_MPI_Common.h"
+#include "OperatorResidentCodegen_Internal.h"
+
+namespace dacppTranslator {
+namespace mpi_rewriter {
+namespace operator_resident {
+
+namespace {
+
+bool isLoopInvariantDirectRead(const ParamAccessPlan& param) {
+    return param.reads && !param.writes &&
+           param.access == ParamAccessKind::DirectMapped;
+}
+
+std::string ctxLocalName(const ParamAccessPlan& param) {
+    return "ctx." + localName(param);
+}
+
+std::string ctxScalarName(const ParamAccessPlan& param) {
+    return "ctx." + scalarName(param);
+}
+
+std::string timeScalarName(const ParamAccessPlan& param) {
+    return "__or_time_scalar_" + param.calcParamName;
+}
+
+bool isIdentifierChar(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+}
+
+std::string stripExprWhitespace(std::string text) {
+    text.erase(std::remove_if(text.begin(), text.end(),
+                              [](unsigned char c) {
+                                  return std::isspace(c) != 0;
+                              }),
+               text.end());
+    return text;
+}
+
+std::string replaceIdentifier(std::string text,
+                              const std::string& from,
+                              const std::string& to) {
+    if (from.empty() || from == to) {
+        return text;
+    }
+    std::size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::string::npos) {
+        const bool leftOk =
+            pos == 0 || !isIdentifierChar(text[static_cast<std::size_t>(pos - 1)]);
+        const std::size_t right = pos + from.size();
+        const bool rightOk =
+            right >= text.size() || !isIdentifierChar(text[right]);
+        if (leftOk && rightOk) {
+            text.replace(pos, from.size(), to);
+            pos += to.size();
+        } else {
+            pos += from.size();
+        }
+    }
+    return text;
+}
+
+std::string loopLowerRowIndexExprForCodegen(
+    const ShellPartitionPlan& plan) {
+    std::string expr =
+        stripExprWhitespace(plan.loopLowerSelectiveMaterialize.rowIndexExpr);
+    for (const auto& param : plan.params) {
+        if (param.access == ParamAccessKind::ReplicatedScalar &&
+            !param.actualTensorName.empty()) {
+            expr = replaceIdentifier(expr, param.actualTensorName + "[0]",
+                                     ctxScalarName(param));
+        }
+    }
+    for (const auto& param : plan.params) {
+        if (!param.actualTensorName.empty()) {
+            expr = replaceIdentifier(expr, param.actualTensorName,
+                                     paramVarName(param));
+        }
+    }
+    return expr;
+}
+
+std::string loopLowerRowIndexExprForTimeLoopCodegen(
+    const ShellPartitionPlan& plan) {
+    std::string expr =
+        stripExprWhitespace(plan.loopLowerSelectiveMaterialize.rowIndexExpr);
+    for (const auto& param : plan.params) {
+        if (param.access == ParamAccessKind::ReplicatedScalar &&
+            !param.actualTensorName.empty()) {
+            expr = replaceIdentifier(expr, param.actualTensorName + "[0]",
+                                     timeScalarName(param));
+        }
+    }
+    for (const auto& param : plan.params) {
+        if (!param.actualTensorName.empty()) {
+            expr = replaceIdentifier(expr, param.actualTensorName,
+                                     paramVarName(param));
+        }
+    }
+    return expr;
+}
+
+bool selectiveMaterializeAppliesTo(const ShellPartitionPlan& plan,
+                                   const ParamAccessPlan& param) {
+    return plan.loopLowerSelectiveMaterialize.enabled &&
+           plan.loopLowerSelectiveMaterialize.outputTensorName ==
+               param.actualTensorName &&
+           !plan.loopLowerSelectiveMaterialize.rowIndexExpr.empty() &&
+           plan.loopLowerSelectiveMaterialize.targetRow >= 0;
+}
+
+void emitMaterializeOutput(std::string& code,
+                           const ShellPartitionPlan& plan,
+                           const ParamAccessPlan& param,
+                           const std::string& localBufferName);
+
+void emitContextType(std::string& code,
+                     const std::string& ctxName,
+                     const ShellPartitionPlan& plan) {
+    code += "struct " + ctxName + " {\n";
+    code += "    int mpi_rank = 0;\n";
+    code += "    int mpi_size = 1;\n";
+    code += "    int64_t __or_total_items = 0;\n";
+    code += "    int64_t __or_local_item_count = 0;\n";
+    code += "    dacpp::mpi::operator_resident::RankRange1D __or_range{};\n";
+    code += "    std::vector<int> __or_counts;\n";
+    code += "    std::vector<int> __or_displs;\n";
+    code += "    dacpp::mpi::SegmentedProfile __or_profile;\n";
+    code += "    sycl::queue& q = dacpp::mpi::operator_resident::default_queue();\n";
+    for (const auto& param : plan.params) {
+        const std::string type = elemType(plan, param);
+        if (param.access == ParamAccessKind::ReplicatedScalar) {
+            code += "    " + type + " " + scalarName(param) + "{};\n";
+            code += "    std::vector<" + type + "> " + localName(param) +
+                    ";\n";
+        } else if (isLoopInvariantDirectRead(param) || param.writes) {
+            code += "    std::vector<" + type + "> " + localName(param) +
+                    ";\n";
+        }
+    }
+    code += "};\n";
+}
+
+void emitInitFunction(std::string& code,
+                      const std::string& ctxName,
+                      const std::string& initName,
+                      const ShellPartitionPlan& plan) {
+    const auto& firstDomain = plan.bindDomains.front();
+    const std::string firstTensor =
+        paramVarName(plan.params[static_cast<std::size_t>(
+            firstDomain.runtimeSizeParam)]);
+    code += "void " + initName + "(" + ctxName + "& ctx, " +
+            wrapperSignature(plan) + ") {\n";
+    code += "    auto dacpp_profile_init_start = dacpp::mpi::profileSegmentStart();\n";
+    code += "    MPI_Comm_rank(MPI_COMM_WORLD, &ctx.mpi_rank);\n";
+    code += "    MPI_Comm_size(MPI_COMM_WORLD, &ctx.mpi_size);\n";
+    code += "    ctx.__or_total_items = " + firstTensor + ".getShape(" +
+            std::to_string(firstDomain.dimId) + ");\n";
+    code += "    ctx.__or_range = dacpp::mpi::operator_resident::rank_range_1d(ctx.__or_total_items, ctx.mpi_rank, ctx.mpi_size);\n";
+    code += "    ctx.__or_local_item_count = ctx.__or_range.count;\n";
+    code += "    dacpp::mpi::operator_resident::counts_displs_1d(ctx.__or_total_items, ctx.mpi_size, ctx.__or_counts, ctx.__or_displs);\n";
+    code += "    dacpp::mpi::recordProfileSegment(ctx.__or_profile, dacpp::mpi::ProfileSegment::Init, dacpp_profile_init_start);\n";
+    for (const auto& param : plan.params) {
+        if (!isLoopInvariantDirectRead(param)) {
+            continue;
+        }
+        const std::string type = elemType(plan, param);
+        const std::string mpiType = mpiDatatypeFor(type);
+        const std::string local = ctxLocalName(param);
+        const std::string global = "__or_global_" + param.calcParamName;
+        code += "    auto dacpp_profile_scatter_start_" +
+                param.calcParamName +
+                " = dacpp::mpi::profileSegmentStart();\n";
+        code += "    " + local +
+                ".resize(static_cast<std::size_t>(ctx.__or_local_item_count));\n";
+        code += "    std::vector<" + type + "> " + global + ";\n";
+        code += "    if (ctx.mpi_rank == 0) {\n";
+        code += "        " + paramVarName(param) + ".tensor2Array(" + global +
+                ");\n";
+        code += "    }\n";
+        if (usesByte(plan, param)) {
+            code += "    std::vector<int> __or_counts_bytes_" +
+                    param.calcParamName + ";\n";
+            code += "    std::vector<int> __or_displs_bytes_" +
+                    param.calcParamName + ";\n";
+            code += "    dacpp::mpi::operator_resident::byte_counts_displs(ctx.__or_counts, ctx.__or_displs, sizeof(" +
+                    type + "), __or_counts_bytes_" + param.calcParamName +
+                    ", __or_displs_bytes_" + param.calcParamName + ");\n";
+            code += "    MPI_Scatterv(ctx.mpi_rank == 0 ? " + global +
+                    ".data() : nullptr, ctx.mpi_rank == 0 ? __or_counts_bytes_" +
+                    param.calcParamName +
+                    ".data() : nullptr, ctx.mpi_rank == 0 ? __or_displs_bytes_" +
+                    param.calcParamName + ".data() : nullptr, MPI_BYTE, " +
+                    local +
+                    ".data(), static_cast<int>(ctx.__or_local_item_count * sizeof(" +
+                    type + ")), MPI_BYTE, 0, MPI_COMM_WORLD);\n";
+        } else {
+            code += "    MPI_Scatterv(ctx.mpi_rank == 0 ? " + global +
+                    ".data() : nullptr, ctx.mpi_rank == 0 ? ctx.__or_counts.data() : nullptr, ctx.mpi_rank == 0 ? ctx.__or_displs.data() : nullptr, " +
+                    mpiType + ", " + local +
+                    ".data(), static_cast<int>(ctx.__or_local_item_count), " +
+                    mpiType + ", 0, MPI_COMM_WORLD);\n";
+        }
+        code += "    dacpp::mpi::recordProfileSegment(ctx.__or_profile, dacpp::mpi::ProfileSegment::Scatter, dacpp_profile_scatter_start_" +
+                param.calcParamName + ");\n";
+    }
+    for (const auto& param : plan.params) {
+        if (!param.writes || param.access != ParamAccessKind::OutputDirect) {
+            continue;
+        }
+        code += "    " + ctxLocalName(param) +
+                ".assign(static_cast<std::size_t>(ctx.__or_local_item_count), " +
+                elemType(plan, param) + "{});\n";
+    }
+    code += "}\n";
+}
+
+void emitScalarRefreshes(std::string& code,
+                         const ShellPartitionPlan& plan,
+                         bool useLocalReplicatedScalar) {
+    for (const auto& param : plan.params) {
+        if (param.access != ParamAccessKind::ReplicatedScalar) {
+            continue;
+        }
+        const std::string type = elemType(plan, param);
+        const std::string scalar = ctxScalarName(param);
+        const std::string local = ctxLocalName(param);
+        code += "    if (" + paramVarName(param) + ".getSize() != 1) {\n";
+        code += "        if (ctx.mpi_rank == 0) std::fprintf(stderr, \"[DACPP][MPI][OR][P4.5] scalar parameter " +
+                param.shellParamName + " expected size 1\\n\");\n";
+        code += "        MPI_Abort(MPI_COMM_WORLD, 2);\n";
+        code += "    }\n";
+        code += "    " + scalar + " = " + type + "{};\n";
+        if (useLocalReplicatedScalar) {
+            code += "    // P4.5 loop-lowered direct scalar reader: all ranks execute the host scalar update, so refresh from the local replicated tensor without per-iteration MPI_Bcast.\n";
+        } else {
+            code += "    if (ctx.mpi_rank == 0) {\n";
+        }
+        const std::string refreshIndent =
+            useLocalReplicatedScalar ? "    " : "        ";
+        code += refreshIndent + "std::vector<" + type + "> __or_scalar_vec_" +
+                param.calcParamName + ";\n";
+        code += refreshIndent + paramVarName(param) + ".tensor2Array(__or_scalar_vec_" +
+                param.calcParamName + ");\n";
+        code += refreshIndent + "if (!__or_scalar_vec_" + param.calcParamName +
+                ".empty()) " + scalar + " = __or_scalar_vec_" +
+                param.calcParamName + "[0];\n";
+        if (!useLocalReplicatedScalar) {
+            code += "    }\n";
+            if (usesByte(plan, param)) {
+                code += "    MPI_Bcast(&" + scalar +
+                        ", static_cast<int>(sizeof(" + type +
+                        ")), MPI_BYTE, 0, MPI_COMM_WORLD);\n";
+            } else {
+                code += "    MPI_Bcast(&" + scalar + ", 1, " +
+                        mpiDatatypeFor(type) + ", 0, MPI_COMM_WORLD);\n";
+            }
+        }
+        code += "    " + local + ".assign(1, " + scalar + ");\n";
+    }
+}
+
+void emitRunKernel(std::string& code, const ShellPartitionPlan& plan) {
+    code += "    const int64_t __or_local_item_count = ctx.__or_local_item_count;\n";
+    code += "    auto& q = ctx.q;\n";
+    code += "    if (__or_local_item_count > 0) {\n";
+    code += "        {\n";
+    for (const auto& param : plan.params) {
+        const std::string type = elemType(plan, param);
+        const std::string name = param.calcParamName;
+        code += "            sycl::buffer<" + type + ", 1> __or_buffer_" +
+                name + "(" + ctxLocalName(param) +
+                ".data(), sycl::range<1>(" + ctxLocalName(param) +
+                ".size()));\n";
+    }
+    code += "            q.submit([&](sycl::handler& h) {\n";
+    for (const auto& param : plan.params) {
+        const std::string mode =
+            param.reads && !param.writes ? "sycl::access::mode::read"
+                                         : "sycl::access::mode::read_write";
+        code += "                auto __or_acc_" + param.calcParamName +
+                " = __or_buffer_" + param.calcParamName +
+                ".get_access<" + mode + ">(h);\n";
+    }
+    code += "                h.parallel_for(sycl::range<1>(static_cast<std::size_t>(__or_local_item_count)), [=](sycl::id<1> idx) {\n";
+    code += "                    const int item_linear = static_cast<int>(idx[0]);\n";
+    for (const auto& param : plan.params) {
+        code += "                    auto* __or_data_" + param.calcParamName +
+                " = __or_acc_" + param.calcParamName +
+                ".template get_multi_ptr<sycl::access::decorated::no>().get();\n";
+        std::string offset = "item_linear";
+        if (param.access == ParamAccessKind::ReplicatedScalar ||
+            param.access == ParamAccessKind::ReplicatedFullTensor) {
+            offset = "0";
+        }
+        code += "                    " + viewType(plan, param) + " view_" +
+                param.calcParamName + "{__or_data_" + param.calcParamName +
+                ", " + offset + "};\n";
+    }
+    code += "                    " + plan.exprNode.calc->getName() +
+            "_mpi_local(";
+    for (int paramIdx = 0; paramIdx < plan.exprNode.calc->getNumParams();
+         ++paramIdx) {
+        if (paramIdx != 0) {
+            code += ", ";
+        }
+        code += "view_" + plan.exprNode.calc->getParam(paramIdx)->getName();
+    }
+    code += ");\n";
+    code += "                });\n";
+    code += "            });\n";
+    code += "            q.wait();\n";
+    code += "        }\n";
+    code += "    }\n";
+}
+
+void emitDeviceTimeLoopRunFunction(std::string& code,
+                                   const std::string& ctxName,
+                                   const std::string& runLoopName,
+                                   const ShellPartitionPlan& plan) {
+    if (!plan.loopLowerDeviceTimeLoop.enabled) {
+        return;
+    }
+    const ParamAccessPlan* output = nullptr;
+    const ParamAccessPlan* scalar = nullptr;
+    for (const auto& param : plan.params) {
+        if (param.writes && param.access == ParamAccessKind::OutputDirect) {
+            output = &param;
+        }
+        if (param.access == ParamAccessKind::ReplicatedScalar) {
+            scalar = &param;
+        }
+    }
+    if (!output || !scalar) {
+        return;
+    }
+    code += "bool " + runLoopName + "(" + ctxName + "& ctx, " +
+            wrapperSignature(plan) + ") {\n";
+    emitScalarRefreshes(code, plan, true);
+    const std::string initialScalar =
+        "__or_initial_scalar_" + scalar->calcParamName;
+    const std::string localItemCount = "__or_local_item_count";
+    code += "    // P4.5 device time loop: each work-item replays scalar evolution locally and materializes only the selected host row.\n";
+    code += "    const " + elemType(plan, *scalar) + " " + initialScalar +
+            " = " + ctxScalarName(*scalar) + ";\n";
+    code += "    const int64_t " + localItemCount +
+            " = ctx.__or_local_item_count;\n";
+    code += "    auto& q = ctx.q;\n";
+    code += "    const auto __or_selective_target_row = static_cast<int64_t>(" +
+            std::to_string(plan.loopLowerSelectiveMaterialize.targetRow) +
+            ");\n";
+    code += "    bool __or_selected_row_reached = false;\n";
+    code += "    {\n";
+    code += "        " + elemType(plan, *scalar) + " " +
+            timeScalarName(*scalar) + " = " + initialScalar +
+            ";\n";
+    code += "        while (" +
+            plan.loopLowerDeviceTimeLoop.conditionExpr + ") {\n";
+    code += "            const int64_t __or_selective_row = static_cast<int64_t>(" +
+            loopLowerRowIndexExprForTimeLoopCodegen(plan) + ");\n";
+    code += "            if (__or_selective_row == __or_selective_target_row) {\n";
+    code += "                __or_selected_row_reached = true;\n";
+    code += "                break;\n";
+    code += "            }\n";
+    code += "            " + plan.loopLowerDeviceTimeLoop.updateStmt + "\n";
+    code += "        }\n";
+    code += "    }\n";
+    code += "    auto dacpp_profile_kernel_start = dacpp::mpi::profileSegmentStart();\n";
+    code += "    if (" + localItemCount + " > 0) {\n";
+    code += "        {\n";
+    for (const auto& param : plan.params) {
+        if (param.access == ParamAccessKind::ReplicatedScalar) {
+            continue;
+        }
+        const std::string type = elemType(plan, param);
+        const std::string name = param.calcParamName;
+        code += "            sycl::buffer<" + type + ", 1> __or_buffer_" +
+                name + "(" + ctxLocalName(param) +
+                ".data(), sycl::range<1>(" + ctxLocalName(param) +
+                ".size()));\n";
+    }
+    code += "            q.submit([&](sycl::handler& h) {\n";
+    for (const auto& param : plan.params) {
+        if (param.access == ParamAccessKind::ReplicatedScalar) {
+            continue;
+        }
+        const std::string mode =
+            param.reads && !param.writes ? "sycl::access::mode::read"
+                                         : "sycl::access::mode::read_write";
+        code += "                auto __or_acc_" + param.calcParamName +
+                " = __or_buffer_" + param.calcParamName +
+                ".get_access<" + mode + ">(h);\n";
+    }
+    code += "                h.parallel_for(sycl::range<1>(static_cast<std::size_t>(" + localItemCount + ")), [=](sycl::id<1> idx) {\n";
+    code += "                    const int item_linear = static_cast<int>(idx[0]);\n";
+    code += "                    const int64_t __or_selective_target = __or_selective_target_row;\n";
+    code += "                    " + elemType(plan, *scalar) + " " +
+            timeScalarName(*scalar) + " = " + initialScalar +
+            ";\n";
+    code += "                    " + elemType(plan, *output) +
+            " __or_selected_value = " + elemType(plan, *output) + "{};\n";
+    code += "                    while (" +
+            plan.loopLowerDeviceTimeLoop.conditionExpr + ") {\n";
+    code += "                        const int64_t __or_selective_row = static_cast<int64_t>(" +
+            loopLowerRowIndexExprForTimeLoopCodegen(plan) + ");\n";
+    for (const auto& param : plan.params) {
+        if (param.access == ParamAccessKind::ReplicatedScalar) {
+            code += "                        " + elemType(plan, param) +
+                    " __or_scalar_storage_" + param.calcParamName + "[1] = {" +
+                    timeScalarName(param) + "};\n";
+            code += "                        dacpp::mpi::ContiguousView1D<" +
+                    elemType(plan, param) + "> view_" + param.calcParamName +
+                    "{__or_scalar_storage_" + param.calcParamName +
+                    ", 0};\n";
+            continue;
+        }
+        code += "                        auto* __or_data_" +
+                param.calcParamName + " = __or_acc_" + param.calcParamName +
+                ".template get_multi_ptr<sycl::access::decorated::no>().get();\n";
+        std::string offset = "item_linear";
+        if (param.access == ParamAccessKind::ReplicatedScalar ||
+            param.access == ParamAccessKind::ReplicatedFullTensor) {
+            offset = "0";
+        }
+        code += "                        " + viewType(plan, param) +
+                " view_" + param.calcParamName + "{__or_data_" +
+                param.calcParamName + ", " + offset + "};\n";
+    }
+    code += "                        " + plan.exprNode.calc->getName() +
+            "_mpi_local(";
+    for (int paramIdx = 0; paramIdx < plan.exprNode.calc->getNumParams();
+         ++paramIdx) {
+        if (paramIdx != 0) {
+            code += ", ";
+        }
+        code += "view_" + plan.exprNode.calc->getParam(paramIdx)->getName();
+    }
+    code += ");\n";
+    code += "                        if (__or_selective_row == __or_selective_target) {\n";
+    code += "                            auto* __or_output_data = __or_acc_" +
+            output->calcParamName +
+            ".template get_multi_ptr<sycl::access::decorated::no>().get();\n";
+    code += "                            __or_selected_value = __or_output_data[item_linear];\n";
+    code += "                        }\n";
+    code += "                        " + plan.loopLowerDeviceTimeLoop.updateStmt +
+            "\n";
+    code += "                    }\n";
+    code += "                    if (__or_selected_row_reached) {\n";
+    code += "                        auto* __or_output_data = __or_acc_" +
+            output->calcParamName +
+            ".template get_multi_ptr<sycl::access::decorated::no>().get();\n";
+    code += "                        __or_output_data[item_linear] = __or_selected_value;\n";
+    code += "                    }\n";
+    code += "                });\n";
+    code += "            });\n";
+    code += "            q.wait();\n";
+    code += "        }\n";
+    code += "    }\n";
+    code += "    dacpp::mpi::recordProfileSegment(ctx.__or_profile, dacpp::mpi::ProfileSegment::Kernel, dacpp_profile_kernel_start);\n";
+    code += "    auto& __or_resident_out_" + output->calcParamName +
+            " = dacpp::mpi::operator_resident::ensure_resident<" +
+            elemType(plan, *output) + ">(" + paramVarName(*output) + ", " +
+            ctxLocalName(*output) + ".size());\n";
+    code += "    __or_resident_out_" + output->calcParamName + " = " +
+            ctxLocalName(*output) + ";\n";
+    code += "    if (__or_selected_row_reached) {\n";
+    emitMaterializeOutput(code, plan, *output, ctxLocalName(*output));
+    code += "    }\n";
+    code += "    return __or_selected_row_reached;\n";
+    code += "}\n";
+}
+
+void emitMaterializeOutput(std::string& code,
+                           const ShellPartitionPlan& plan,
+                           const ParamAccessPlan& param,
+                           const std::string& localBufferName) {
+    const std::string type = elemType(plan, param);
+    const std::string mpiType = mpiDatatypeFor(type);
+    const std::string global = "__or_materialized_" + param.calcParamName;
+    code += "    std::vector<" + type + "> " + global + ";\n";
+    code += "    if (ctx.mpi_rank == 0) {\n";
+    code += "        " + global +
+            ".resize(static_cast<std::size_t>(ctx.__or_total_items));\n";
+    code += "    }\n";
+    code += "    auto dacpp_profile_gather_start_" + param.calcParamName +
+            " = dacpp::mpi::profileSegmentStart();\n";
+    if (usesByte(plan, param)) {
+        code += "    std::vector<int> __or_counts_bytes_" +
+                param.calcParamName + "_gather;\n";
+        code += "    std::vector<int> __or_displs_bytes_" +
+                param.calcParamName + "_gather;\n";
+        code += "    dacpp::mpi::operator_resident::byte_counts_displs(ctx.__or_counts, ctx.__or_displs, sizeof(" +
+                type + "), __or_counts_bytes_" + param.calcParamName +
+                "_gather, __or_displs_bytes_" + param.calcParamName +
+                "_gather);\n";
+        code += "    MPI_Gatherv(" + localBufferName +
+                ".data(), static_cast<int>(ctx.__or_local_item_count * sizeof(" +
+                type + ")), MPI_BYTE, ctx.mpi_rank == 0 ? " + global +
+                ".data() : nullptr, ctx.mpi_rank == 0 ? __or_counts_bytes_" +
+                param.calcParamName +
+                "_gather.data() : nullptr, ctx.mpi_rank == 0 ? __or_displs_bytes_" +
+                param.calcParamName +
+                "_gather.data() : nullptr, MPI_BYTE, 0, MPI_COMM_WORLD);\n";
+    } else {
+        code += "    MPI_Gatherv(" + localBufferName +
+                ".data(), static_cast<int>(ctx.__or_local_item_count), " +
+                mpiType + ", ctx.mpi_rank == 0 ? " + global +
+                ".data() : nullptr, ctx.mpi_rank == 0 ? ctx.__or_counts.data() : nullptr, ctx.mpi_rank == 0 ? ctx.__or_displs.data() : nullptr, " +
+                mpiType + ", 0, MPI_COMM_WORLD);\n";
+    }
+    code += "    dacpp::mpi::recordProfileSegment(ctx.__or_profile, dacpp::mpi::ProfileSegment::Gather, dacpp_profile_gather_start_" +
+            param.calcParamName + ");\n";
+    code += "    auto dacpp_profile_materialize_start_" + param.calcParamName +
+            " = dacpp::mpi::profileSegmentStart();\n";
+    code += "    if (ctx.mpi_rank == 0) {\n";
+    code += "        " + paramVarName(param) + ".array2Tensor(" + global +
+            ");\n";
+    if (param.broadcastMaterializedOutput) {
+        code += "        if (!" + global + ".empty()) {\n";
+        code += "            auto dacpp_profile_bcast_start_" +
+                param.calcParamName +
+                " = dacpp::mpi::profileSegmentStart();\n";
+        code += "            MPI_Bcast(" + global + ".data(), " +
+                mpiPayloadCountExpr(paramVarName(param) + ".getSize()", type) +
+                ", " + mpiType + ", 0, MPI_COMM_WORLD);\n";
+        code += "            dacpp::mpi::recordProfileSegment(ctx.__or_profile, dacpp::mpi::ProfileSegment::Bcast, dacpp_profile_bcast_start_" +
+                param.calcParamName + ");\n";
+        code += "        }\n";
+    }
+    if (param.broadcastMaterializedOutput) {
+        code += "    } else {\n";
+        code += "        " + global + ".resize(static_cast<std::size_t>(" +
+                paramVarName(param) + ".getSize()));\n";
+        code += "        if (!" + global + ".empty()) {\n";
+        code += "            auto dacpp_profile_bcast_start_" +
+                param.calcParamName +
+                " = dacpp::mpi::profileSegmentStart();\n";
+        code += "            MPI_Bcast(" + global + ".data(), " +
+                mpiPayloadCountExpr(paramVarName(param) + ".getSize()", type) +
+                ", " + mpiType + ", 0, MPI_COMM_WORLD);\n";
+        code += "            dacpp::mpi::recordProfileSegment(ctx.__or_profile, dacpp::mpi::ProfileSegment::Bcast, dacpp_profile_bcast_start_" +
+                param.calcParamName + ");\n";
+        code += "        }\n";
+        code += "        " + paramVarName(param) + ".array2Tensor(" + global +
+                ");\n";
+        code += "    }\n";
+    } else {
+        code += "    }\n";
+    }
+    code += "    dacpp::mpi::recordProfileSegment(ctx.__or_profile, dacpp::mpi::ProfileSegment::Materialize, dacpp_profile_materialize_start_" +
+            param.calcParamName + ");\n";
+}
+
+void emitRunFunction(std::string& code,
+                     const std::string& ctxName,
+                     const std::string& runName,
+                     const ShellPartitionPlan& plan) {
+    code += "void " + runName + "(" + ctxName + "& ctx, " +
+            wrapperSignature(plan) + ") {\n";
+    const bool useLocalReplicatedScalar =
+        plan.loopLowerReplicatedScalarLocalRefresh;
+    const bool hasScalarRefresh = [&]() {
+        for (const auto& param : plan.params) {
+            if (param.access == ParamAccessKind::ReplicatedScalar) {
+                return true;
+            }
+        }
+        return false;
+    }();
+    if (hasScalarRefresh && !useLocalReplicatedScalar) {
+        code += "    auto dacpp_profile_bcast_start = dacpp::mpi::profileSegmentStart();\n";
+    }
+    emitScalarRefreshes(code, plan, useLocalReplicatedScalar);
+    if (hasScalarRefresh && !useLocalReplicatedScalar) {
+        code += "    dacpp::mpi::recordProfileSegment(ctx.__or_profile, dacpp::mpi::ProfileSegment::Bcast, dacpp_profile_bcast_start);\n";
+    }
+    code += "    auto dacpp_profile_kernel_start = dacpp::mpi::profileSegmentStart();\n";
+    emitRunKernel(code, plan);
+    code += "    dacpp::mpi::recordProfileSegment(ctx.__or_profile, dacpp::mpi::ProfileSegment::Kernel, dacpp_profile_kernel_start);\n";
+    for (const auto& param : plan.params) {
+        if (!param.writes || param.access != ParamAccessKind::OutputDirect) {
+            continue;
+        }
+        const std::string type = elemType(plan, param);
+        if (!param.materializeAfterWrite || param.retainResidentAfterWrite) {
+            code += "    auto& __or_resident_out_" + param.calcParamName +
+                    " = dacpp::mpi::operator_resident::ensure_resident<" +
+                    type + ">(" + paramVarName(param) + ", " +
+                    ctxLocalName(param) + ".size());\n";
+            code += "    __or_resident_out_" + param.calcParamName + " = " +
+                    ctxLocalName(param) + ";\n";
+        } else {
+            code += "    // No downstream resident reader for " +
+                    param.calcParamName +
+                    "; host materialization below preserves visibility.\n";
+        }
+        if (plan.loopLowerMaterializeEveryRun || param.materializeAfterWrite) {
+            if (selectiveMaterializeAppliesTo(plan, param)) {
+                const std::string rowExpr = loopLowerRowIndexExprForCodegen(plan);
+                code += "    const int64_t __or_selective_materialize_row_" +
+                        param.calcParamName + " = static_cast<int64_t>(" +
+                        rowExpr + ");\n";
+                code += "    if (__or_selective_materialize_row_" +
+                        param.calcParamName + " == " +
+                        std::to_string(
+                            plan.loopLowerSelectiveMaterialize.targetRow) +
+                        ") {\n";
+                emitMaterializeOutput(code, plan, param, ctxLocalName(param));
+                code += "    }\n";
+            } else {
+                emitMaterializeOutput(code, plan, param, ctxLocalName(param));
+            }
+        }
+    }
+    code += "}\n";
+}
+
+void emitMaterializeFunction(std::string& code,
+                             const std::string& ctxName,
+                             const std::string& materializeName,
+                             const ShellPartitionPlan& plan) {
+    code += "void " + materializeName + "(" + ctxName + "& ctx, " +
+            wrapperSignature(plan) + ") {\n";
+    for (const auto& param : plan.params) {
+        if (!param.writes || param.access != ParamAccessKind::OutputDirect) {
+            continue;
+        }
+        if (plan.loopLowerMaterializeEveryRun) {
+            code += "    (void)ctx;\n";
+            code += "    dacpp::mpi::reportSegmentedProfile(\"" + materializeName +
+                    "\", ctx.__or_profile, MPI_COMM_WORLD);\n";
+            code += "}\n";
+            return;
+        }
+        emitMaterializeOutput(code, plan, param, ctxLocalName(param));
+    }
+    code += "    auto dacpp_profile_materialize_start = dacpp::mpi::profileSegmentStart();\n";
+    code += "    dacpp::mpi::recordProfileSegment(ctx.__or_profile, dacpp::mpi::ProfileSegment::Materialize, dacpp_profile_materialize_start);\n";
+    code += "    dacpp::mpi::reportSegmentedProfile(\"" + materializeName +
+            "\", ctx.__or_profile, MPI_COMM_WORLD);\n";
+    code += "}\n";
+}
+
+} // namespace
+
+std::string buildLoopLoweredDirect1DFamilyCode(
+    const std::string& baseName,
+    DacppFile*,
+    const ShellPartitionPlan& plan) {
+    Shell* shell = plan.exprNode.shell;
+    Calc* calc = plan.exprNode.calc;
+    const int exprIndex = plan.exprIndex;
+    const std::string ctxName =
+        operatorResidentContextTypeName(shell, calc, exprIndex);
+    const std::string initName =
+        operatorResidentInitFunctionName(shell, calc, exprIndex);
+    const std::string runName =
+        operatorResidentRunFunctionName(shell, calc, exprIndex);
+    const std::string runLoopName =
+        operatorResidentRunLoopFunctionName(shell, calc, exprIndex);
+    const std::string materializeName =
+        operatorResidentMaterializeFunctionName(shell, calc, exprIndex);
+    std::string code;
+    emitContextType(code, ctxName, plan);
+    emitInitFunction(code, ctxName, initName, plan);
+    emitRunFunction(code, ctxName, runName, plan);
+    emitDeviceTimeLoopRunFunction(code, ctxName, runLoopName, plan);
+    emitMaterializeFunction(code, ctxName, materializeName, plan);
+    code += "void " + baseName + "(" + wrapperSignature(plan) + ") {\n";
+    code += "    " + ctxName + " ctx;\n";
+    code += "    " + initName + "(ctx";
+    for (const auto& param : plan.params) {
+        code += ", " + paramVarName(param);
+    }
+    code += ");\n";
+    code += "    " + runName + "(ctx";
+    for (const auto& param : plan.params) {
+        code += ", " + paramVarName(param);
+    }
+    code += ");\n";
+    if (!plan.loopLowerMaterializeEveryRun) {
+        code += "    " + materializeName + "(ctx";
+        for (const auto& param : plan.params) {
+            code += ", " + paramVarName(param);
+        }
+        code += ");\n";
+    }
+    code += "}\n";
+    return code;
+}
+
+} // namespace operator_resident
+} // namespace mpi_rewriter
+} // namespace dacppTranslator

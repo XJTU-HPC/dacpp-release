@@ -9,7 +9,7 @@ namespace tensor {
 
 class TensorException : public std::exception {
 public:
-    TensorException(const std::string& message, const char* file, const char* function, int line)
+    TensorException(const std::string& message, const char* file, const char* function, int line) 
         : message_(message), file_(file), function_(function), line_(line) {
         constructFullMessage();
     }
@@ -49,7 +49,7 @@ private:
             THROW_TENSOR_EXCEPTION("Expected size %d, but got %d", expected_size, data_size); \
         } \
     } while (0)
-
+    
 #define CHECK_INDEX_BOUNDS(idx, dim) \
     do { \
         if ((idx) < 0 || (idx) >= (dim)) { \
@@ -86,6 +86,7 @@ private:
         } \
     } while (0)
 
+
 #define CHECK_SLICE(dimIdx, idx_or_start, end, dim_, shape_) \
     do { \
         if ((dimIdx) < 0 || (dimIdx) >= (dim_) || \
@@ -98,6 +99,8 @@ private:
         } \
     } while (0)
 
-}
 
-#endif
+
+} // namespace tensor
+
+#endif // TENSOR_EXCEPTION_H_

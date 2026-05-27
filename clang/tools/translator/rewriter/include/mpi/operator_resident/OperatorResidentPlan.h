@@ -1,0 +1,301 @@
+#ifndef DACPP_REWRITER_MPI_OPERATOR_RESIDENT_PLAN_H
+#define DACPP_REWRITER_MPI_OPERATOR_RESIDENT_PLAN_H
+
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "mpi/shared/LoweringContract.h"
+#include "mpi/shared/MpiPlanBase.h"
+#include "mpi/shared/PostUseSyncPlan.h"
+
+namespace clang {
+class Stmt;
+class BinaryOperator;
+} // namespace clang
+
+namespace dacppTranslator {
+namespace mpi_rewriter {
+
+enum class ShellDimKind {
+    Index,
+    Void,
+    Split
+};
+
+enum class LocalLayoutKind {
+    Contiguous1D,
+    RowBlock2D,
+    RowPartitionFullRow,
+    ReplicatedScalar,
+    ReplicatedFullTensor,
+    StencilWindow1D,
+    StencilWindow2D,
+    FixedBlock,
+    Unsupported
+};
+
+enum class ParamAccessKind {
+    DirectMapped,
+    OutputDirect,
+    ReplicatedScalar,
+    ReplicatedFullTensor,
+    RowPartitionFullRow,
+    StencilWindow,
+    FixedBlock,
+    Unsupported
+};
+
+// Payload direction describes how void dimensions relate to index dimensions
+enum class PayloadDirection {
+    FullRow,         // e.g., tensor[{}][idx] - void is row, index is col
+    FullColumn,      // e.g., tensor[idx][{}] - void is col, index is row
+    IndexedRowFullCols, // e.g., tensor[idx][{}] with bind on row - indexed row, full cols
+    IndexedColFullRows, // e.g., tensor[{}][idx] with bind on col - indexed col, full rows
+    Unknown
+};
+
+enum class ResidencyKind {
+    RootOnly,
+    DistributedClean,
+    DistributedDirty,
+    ReplicatedScalar,
+    MaterializedRoot,
+    Unknown
+};
+
+enum class Contiguous1DDistributionKind {
+    Contiguous,
+    Cyclic,
+    BlockCyclic
+};
+
+struct Contiguous1DDistributionPlan {
+    Contiguous1DDistributionKind kind =
+        Contiguous1DDistributionKind::Contiguous;
+    int64_t blockSize = 1;
+    std::string reason;
+};
+
+enum class OrLoopLowerKind {
+    None,
+    Direct1D,
+    RowBlock2D,
+    StencilFullSync,
+    StencilResidentHalo,
+    FixedBlockPhaseExchange,
+    FixedBlockPhaseExchangeFollower
+};
+
+struct OrLoopLowerPlan {
+    OrLoopLowerKind kind = OrLoopLowerKind::None;
+    const clang::Stmt* outerLoop = nullptr;
+    LoopLoweringContract contract;
+    bool contractRemovalSetMatchesLegacy = false;
+    std::string contractRemovalSetReason;
+    bool contractConsistencyCheckPassed = false;
+    std::string contractConsistencyCheckReason;
+    bool hoistReaderSync = false;
+    bool runMaterializeEveryStep = false;
+    bool finalMaterializeRequired = false;
+    struct StencilResidentHaloMetadata {
+        bool enabled = false;
+        bool hasDirectReader = false;
+        int windowSize = 0;
+        int windowRows = 0;
+        int windowCols = 0;
+        int windowStride = 1;
+        int windowRowStride = 1;
+        int windowColStride = 1;
+        int followupTargetOffset = 0;
+        int followupTargetRowOffset = 0;
+        int followupTargetColOffset = 0;
+        int readCacheTargetRowOffset = 0;
+        int readCacheTargetColOffset = 0;
+        bool hasBoundaryLocalUpdate = false;
+        bool boundaryCopiesWriter = false;
+        int boundaryTargetIndex = 0;
+        int boundarySourceIndex = 0;
+        std::string boundaryConstantValue;
+        int leftHalo = 0;
+        int rightHalo = 0;
+        bool spatial2DEnabled = false;
+        int spatial2DHaloWidth = 0;
+        std::string spatial2DRejectReason;
+        std::string spatial2DAcceptReason;
+        int temporalBlockSize = 0;
+        std::string temporalLoopLimitExpr;
+        bool temporalLoopLimitInclusive = false;
+        std::string temporalBlockRejectReason;
+        std::string temporalBlockAcceptReason;
+        std::string rejectReason;
+    } stencilResidentHalo;
+    struct FixedBlockPhaseExchangeMetadata {
+        bool enabled = false;
+        int blockSize = 0;
+        int blockStride = 0;
+        int phaseShiftOffset = 0;
+        int64_t provenEvenTotal = 0;
+        std::string sourceTensorName;
+        std::string phaseAOutputTensorName;
+        std::string elementType;
+        std::vector<const clang::Stmt*> followerStmtsToRemove;
+        const clang::BinaryOperator* followerDacExpr = nullptr;
+        std::string rejectReason;
+    } fixedBlockPhaseExchange;
+    std::string rejectReason;
+};
+
+struct BindDomain {
+    int bindId = -1;
+    std::string representative;
+    std::string offsetExpr = "0";
+    int64_t runtimeSizeParam = -1;
+    int dimId = -1;
+};
+
+struct TensorDimMapping {
+    std::string tensorName;
+    int shellParamIndex = -1;
+    int tensorDim = -1;
+    ShellDimKind kind = ShellDimKind::Void;
+    int bindId = -1;
+    std::string splitName;
+};
+
+struct ConstantInitPlan {
+    bool supported = false;
+    std::string valueExpr;
+    std::string logValue;
+    std::string reason;
+    bool indexExpr = false;
+    std::string globalIndexName;
+    const clang::Stmt* indexFillLoopStmt = nullptr;
+    const clang::Stmt* indexFillAssignmentStmt = nullptr;
+};
+
+struct OutputInitPlan {
+    bool skipInitialSync = false;
+    std::string valueExpr;
+    std::string logValue;
+    std::string reason;
+};
+
+struct LoopLoweredSelectiveMaterializePlan {
+    bool enabled = false;
+    std::string outputTensorName;
+    std::string hostTensorName;
+    std::string hostTensorType;
+    std::string rowIndexExpr;
+    int64_t targetRow = -1;
+    std::string reason;
+};
+
+struct LoopLoweredDeviceTimeLoopPlan {
+    bool enabled = false;
+    std::string scalarTensorName;
+    std::string conditionExpr;
+    std::string updateStmt;
+    std::string reason;
+};
+
+struct PartitionSignature {
+    std::vector<int64_t> bindSizes;
+    std::vector<int> bindOrder;
+    LocalLayoutKind layout = LocalLayoutKind::Unsupported;
+    std::string linearization;
+    Contiguous1DDistributionPlan contiguous1DDistribution;
+};
+
+inline bool isCompatibleForChain(const PartitionSignature& lhs,
+                                 const PartitionSignature& rhs) {
+    return lhs.bindSizes == rhs.bindSizes &&
+           lhs.bindOrder == rhs.bindOrder &&
+           lhs.contiguous1DDistribution.kind ==
+               rhs.contiguous1DDistribution.kind &&
+           lhs.contiguous1DDistribution.blockSize ==
+               rhs.contiguous1DDistribution.blockSize;
+}
+
+struct ParamAccessPlan {
+    int paramIndex = -1;
+    std::string shellParamName;
+    std::string calcParamName;
+    std::string actualTensorName;
+    std::string actualTensorAliasKey;
+    bool actualTensorAliasKeyPrecise = false;
+    ParamAccessKind access = ParamAccessKind::Unsupported;
+    bool reads = false;
+    bool writes = false;
+    std::vector<int> bindOrder;
+    std::vector<int> tensorDims;
+    bool readFromResident = false;
+    bool writeToResident = false;
+    bool retainResidentAfterWrite = false;
+    bool materializeAfterWrite = false;
+    bool broadcastMaterializedOutput = false;
+    bool postUseReductionCountEqOne = false;
+    const clang::Stmt* postUseReductionResetStmt = nullptr;
+    const clang::Stmt* postUseReductionLoopStmt = nullptr;
+    std::string postUseReductionScalarName;
+    PostUseSyncPlan postUseSync;
+    ConstantInitPlan constantInit;
+    OutputInitPlan outputInit;
+
+    // Payload metadata for RowPartitionFullRow/ReplicatedFullTensor
+    PayloadDirection payloadDirection = PayloadDirection::Unknown;
+    std::vector<int> voidDims;              // Tensor dimensions that are void (index split is separate)
+    std::vector<int64_t> voidDimSizes;      // Size of each void dimension
+    int indexDim = -1;                      // Which tensor dim is indexed (-1 if none)
+    int64_t indexDimSize = 1;               // Size of the indexed dimension
+    int fixedBlockSize = 0;
+    int fixedBlockStride = 0;
+};
+
+struct ShellPartitionPlan {
+    bool supported = false;
+    std::string rejectReason;
+    int exprIndex = -1;
+    DacExprNode exprNode;
+    std::vector<BindDomain> bindDomains;
+    std::vector<TensorDimMapping> mappings;
+    PartitionSignature signature;
+    std::vector<ParamAccessPlan> params;
+    bool loopLowerCandidate = false;
+    std::string loopLowerRejectReason;
+    const clang::Stmt* loopLowerOuterLoop = nullptr;
+    bool loopLowerMaterializeEveryRun = false;
+    bool loopLowerReplicatedScalarLocalRefresh = false;
+    std::string loopLowerScalarRefreshReason;
+    LoopLoweredSelectiveMaterializePlan loopLowerSelectiveMaterialize;
+    LoopLoweredDeviceTimeLoopPlan loopLowerDeviceTimeLoop;
+    OrLoopLowerPlan orLoopLower;
+};
+
+struct TensorResidencyState {
+    std::string tensorName;
+    ResidencyKind kind = ResidencyKind::Unknown;
+    PartitionSignature partition;
+    LocalLayoutKind layout = LocalLayoutKind::Unsupported;
+    bool rootValid = true;
+    bool localValid = false;
+};
+
+struct OperatorResidentChainPlan {
+    bool supported = false;
+    std::string rejectReason;
+    int chainId = -1;
+    std::vector<DacExprNode> exprs;
+    std::vector<ShellPartitionPlan> exprPlans;
+    PartitionSignature signature;
+    std::unordered_map<std::string, TensorResidencyState> residency;
+    std::vector<std::string> materializeTensors;
+    bool fusePointwiseRowBlock2D = false;
+    std::string fuseRejectReason;
+};
+
+} // namespace mpi_rewriter
+} // namespace dacppTranslator
+
+#endif

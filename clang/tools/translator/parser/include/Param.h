@@ -9,6 +9,9 @@
 
 namespace dacppTranslator {
 
+/*
+    参数
+*/
 enum class IOTYPE{
     READ,
     WRITE,
@@ -17,9 +20,9 @@ enum class IOTYPE{
 class Param {
 
 private:
-    IOTYPE rw;
-    std::string name;
-    std::vector<int> shape;
+    IOTYPE rw;// 读写属性
+    std::string name; // 参数名
+    std::vector<int> shape; // 参数形状
     int dimension;
 
 public:
@@ -40,22 +43,26 @@ public:
     void __attribute__(( unused, deprecated )) setShape(int idx, int size);
     int __attribute__(( unused, deprecated )) getShape(int idx);
     int __attribute__(( unused, deprecated )) getDim();
-
+    /* 维度：通过tensor的第二个模版参数获取。  */
     int dim;
     void setDimension(int id);
     int getDimension();
-
+    /* 参数类型、参数基本类型。  */
     clang::QualType newType, BasicType;
 };
 
+
+/*
+    划分结构参数
+*/
 class ShellParam : public Param {
 
 private:
-    std::vector<Split*> splits;
+    std::vector<Split*> splits; // 划分组
 
 public:
     ShellParam();
-
+    
     void setSplit(Split* split);
     Split* getSplit(int idx);
     int getNumSplit();

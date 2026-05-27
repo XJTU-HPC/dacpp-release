@@ -60,24 +60,33 @@ SYCL_EXTERNAL T& virtual_to_physical(
         block_id[i] = total_block_id / p.grid_stride[i] % p.grid_shape[i];
         int pos = (block_id[i] * p.block_move[i] + lane_id[i]);
         if (pos < -p.start[i] || pos > -p.start[i] + p.data_shape[i] - 1) {
-            // Out-of-view writes collapse to a dummy reference.
-            static const T zero = 0;
-            return const_cast<T&>(zero);
+            static const T zero = 0;  // 返回只读的静态常量
+            return const_cast<T&>(zero);  //  需要强转以匹配返回类型
         }
         total_pos += (p.start[i] + pos) * p.data_stride[i];
     }
     return data[total_pos];
 }
 
-template<typename ImplType>
-void Slice(ImplType* res, ImplType* d_a, std::vector<int> shape, std::vector<Range> region, sycl::queue& q) {
+// template<typename T>
+// void Slice(DataReconstructor<T> &tool,
+//            int start,
+//            std::vector<int> data_shape)
+// {
+//     tool.set_start(start);
+//     tool.set_data_shape(data_shape);
+// }
 
+template<typename ImplType>
+void Slice(ImplType* res, ImplType* d_a, std::vector<int> shape, std::vector<Range> region, sycl::queue& q) {    
+    // 初始化切片起点
     int dimNum = shape.size();
     std::vector<int> pos;
     for (int i=0;i<dimNum;i++) {
         pos.push_back(region[i].start);
     }
 
+    // 计算切片坐标的线性索引
     auto computeLinearIndex = [&](const std::vector<int>& coord) -> int {
         int index = 0;
         for (int i = 0; i < coord.size(); ++i) {
@@ -97,9 +106,11 @@ void Slice(ImplType* res, ImplType* d_a, std::vector<int> shape, std::vector<Ran
         }
         if(now<0) break;
     }
-
+    // std::cout<<"sliceIndex: \n";
+    // for(int i=0;i<sliceIndex.size();i++) cout<<sliceIndex[i]<<" ";
+    // std::cout<<std::endl<<std::endl;
     sycl::buffer<int> sliceIndexbuffer(sliceIndex.data(), sycl::range<1>(sliceIndex.size()));
-
+    // 并行切片赋值
     sycl::range<3> local(1, 1, sliceIndex.size());
     sycl::range<3> global(1, 1, 1);
     q.submit([&](handler &h) {
@@ -112,14 +123,15 @@ void Slice(ImplType* res, ImplType* d_a, std::vector<int> shape, std::vector<Ran
 }
 
 template<typename ImplType>
-void SetValue(ImplType* d_a, ImplType value, std::vector<int> shape, std::vector<Range> region, sycl::queue& q) {
-
+void SetValue(ImplType* d_a, ImplType value, std::vector<int> shape, std::vector<Range> region, sycl::queue& q) {    
+    // 初始化切片起点
     int dimNum = shape.size();
     std::vector<int> pos;
     for (int i=0;i<dimNum;i++) {
         pos.push_back(region[i].start);
     }
 
+    // 计算切片坐标的线性索引
     auto computeLinearIndex = [&](const std::vector<int>& coord) -> int {
         int index = 0;
         for (int i = 0; i < coord.size(); ++i) {
@@ -140,7 +152,8 @@ void SetValue(ImplType* d_a, ImplType value, std::vector<int> shape, std::vector
         if(now<0) break;
     }
     sycl::buffer<int> sliceIndexbuffer(sliceIndex.data(), sycl::range<1>(sliceIndex.size()));
-
+    
+    // 并行赋值
     sycl::range<3> local(1, 1, sliceIndex.size());
     sycl::range<3> global(1, 1, 1);
     q.submit([&](handler &h) {
@@ -153,14 +166,15 @@ void SetValue(ImplType* d_a, ImplType value, std::vector<int> shape, std::vector
 }
 
 template<typename ImplType>
-void SetValue(ImplType* d_a, ImplType* value, std::vector<int> shape, std::vector<Range> region, sycl::queue& q) {
-
+void SetValue(ImplType* d_a, ImplType* value, std::vector<int> shape, std::vector<Range> region, sycl::queue& q) {    
+    // 初始化切片起点
     int dimNum = shape.size();
     std::vector<int> pos;
     for (int i=0;i<dimNum;i++) {
         pos.push_back(region[i].start);
     }
 
+    // 计算切片坐标的线性索引
     auto computeLinearIndex = [&](const std::vector<int>& coord) -> int {
         int index = 0;
         for (int i = 0; i < coord.size(); ++i) {
@@ -181,7 +195,8 @@ void SetValue(ImplType* d_a, ImplType* value, std::vector<int> shape, std::vecto
         if(now<0) break;
     }
     sycl::buffer<int> sliceIndexbuffer(sliceIndex.data(), sycl::range<1>(sliceIndex.size()));
-
+    
+    // 并行赋值
     sycl::range<3> local(1, 1, sliceIndex.size());
     sycl::range<3> global(1, 1, 1);
     q.submit([&](handler &h) {

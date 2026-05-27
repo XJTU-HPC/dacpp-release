@@ -62,6 +62,7 @@ namespace dacpp{
         std::vector<int> stride_;
     };
 
+
 }
 
 #endif
